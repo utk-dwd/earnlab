@@ -2,8 +2,8 @@
   "_format": "hh-sol-cache-2",
   "files": {
     "/home/chris/projects/ethGlobalAiAgents/earnTest1/contracts/contracts/AgentRegistry.sol": {
-      "lastModificationDate": 1777061239925,
-      "contentHash": "172de57e92718086029a4892e744c761",
+      "lastModificationDate": 1777123149199,
+      "contentHash": "92defc2131fa76f8b458a420cbd75736",
       "sourceName": "contracts/AgentRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -31,7 +31,6 @@
       },
       "imports": [
         "@openzeppelin/contracts/access/Ownable.sol",
-        "./interfaces/IAgentRegistry.sol",
         "./interfaces/IERC7857.sol"
       ],
       "versionPragmas": [
@@ -78,8 +77,8 @@
       ]
     },
     "/home/chris/projects/ethGlobalAiAgents/earnTest1/contracts/contracts/interfaces/IERC7857.sol": {
-      "lastModificationDate": 1777061239921,
-      "contentHash": "4d33bfe0f422a4db8f1ba81b4329b3fb",
+      "lastModificationDate": 1777123149195,
+      "contentHash": "5cd4d4915d00c2d0a085f0961d246cb3",
       "sourceName": "contracts/interfaces/IERC7857.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -105,7 +104,9 @@
           }
         }
       },
-      "imports": [],
+      "imports": [
+        "@openzeppelin/contracts/token/ERC721/IERC721.sol"
+      ],
       "versionPragmas": [
         "^0.8.24"
       ],
@@ -837,8 +838,8 @@
       ]
     },
     "/home/chris/projects/ethGlobalAiAgents/earnTest1/contracts/contracts/ERC7857iNFT.sol": {
-      "lastModificationDate": 1777061239921,
-      "contentHash": "e714951959703e35e09edf0f49c2b36d",
+      "lastModificationDate": 1777123149195,
+      "contentHash": "9a38e7c3bbf12a8eb21eb0dcb8f5ffca",
       "sourceName": "contracts/ERC7857iNFT.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -867,13 +868,54 @@
       "imports": [
         "@openzeppelin/contracts/token/ERC721/ERC721.sol",
         "@openzeppelin/contracts/access/Ownable.sol",
-        "./interfaces/IERC7857.sol"
+        "@openzeppelin/contracts/utils/ReentrancyGuard.sol",
+        "./interfaces/IERC7857.sol",
+        "./MockOracle.sol"
       ],
       "versionPragmas": [
         "^0.8.24"
       ],
       "artifacts": [
         "ERC7857iNFT"
+      ]
+    },
+    "/home/chris/projects/ethGlobalAiAgents/earnTest1/contracts/contracts/MockOracle.sol": {
+      "lastModificationDate": 1777123149195,
+      "contentHash": "d19e80b11c02647ea5516761a951f430",
+      "sourceName": "contracts/MockOracle.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "evmVersion": "cancun",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/access/Ownable.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "IOracle",
+        "MockOracle"
       ]
     }
   }

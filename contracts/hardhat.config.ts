@@ -14,7 +14,7 @@ const config: HardhatUserConfig = {
     zgTestnet: {
       url: process.env.ZG_RPC_URL ?? "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 16601,
+      chainId: 16602,
     },
   },
 };

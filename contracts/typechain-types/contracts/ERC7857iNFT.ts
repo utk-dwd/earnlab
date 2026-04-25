@@ -26,34 +26,43 @@ import type {
 export declare namespace IERC7857 {
   export type AgentMetadataStruct = {
     metadataHash: BytesLike;
+    encryptedURI: string;
     lastUpdated: BigNumberish;
-    authorizedUpdater: AddressLike;
   };
 
   export type AgentMetadataStructOutput = [
     metadataHash: string,
-    lastUpdated: bigint,
-    authorizedUpdater: string
-  ] & { metadataHash: string; lastUpdated: bigint; authorizedUpdater: string };
+    encryptedURI: string,
+    lastUpdated: bigint
+  ] & { metadataHash: string; encryptedURI: string; lastUpdated: bigint };
 }
 
 export interface ERC7857iNFTInterface extends Interface {
   getFunction(
     nameOrSignature:
       | "approve"
+      | "authorizeUsage"
       | "balanceOf"
+      | "clone"
+      | "cloneable"
       | "getAgentMetadata"
       | "getApproved"
+      | "getAuthorization"
       | "isApprovedForAll"
+      | "isAuthorizedExecutor"
       | "mintAgent"
       | "name"
+      | "oracle"
       | "owner"
       | "ownerOf"
       | "renounceOwnership"
+      | "revokeUsage"
       | "safeTransferFrom(address,address,uint256)"
       | "safeTransferFrom(address,address,uint256,bytes)"
+      | "secureTransfer"
       | "setApprovalForAll"
-      | "setExecutor"
+      | "setCloneable"
+      | "setOracle"
       | "supportsInterface"
       | "symbol"
       | "tokenURI"
@@ -64,12 +73,14 @@ export interface ERC7857iNFTInterface extends Interface {
 
   getEvent(
     nameOrSignatureOrTopic:
+      | "AgentCloned"
       | "Approval"
       | "ApprovalForAll"
-      | "ExecutorUpdated"
       | "MetadataUpdated"
+      | "OracleUpdated"
       | "OwnershipTransferred"
       | "Transfer"
+      | "UsageAuthorized"
   ): EventFragment;
 
   encodeFunctionData(
@@ -77,8 +88,20 @@ export interface ERC7857iNFTInterface extends Interface {
     values: [AddressLike, BigNumberish]
   ): string;
   encodeFunctionData(
+    functionFragment: "authorizeUsage",
+    values: [BigNumberish, AddressLike, BytesLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "balanceOf",
     values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "clone",
+    values: [AddressLike, BigNumberish, BytesLike, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "cloneable",
+    values: [BigNumberish]
   ): string;
   encodeFunctionData(
     functionFragment: "getAgentMetadata",
@@ -89,14 +112,23 @@ export interface ERC7857iNFTInterface extends Interface {
     values: [BigNumberish]
   ): string;
   encodeFunctionData(
+    functionFragment: "getAuthorization",
+    values: [BigNumberish, AddressLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "isApprovedForAll",
     values: [AddressLike, AddressLike]
   ): string;
   encodeFunctionData(
+    functionFragment: "isAuthorizedExecutor",
+    values: [BigNumberish, AddressLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "mintAgent",
-    values: [AddressLike, BytesLike, AddressLike]
+    values: [AddressLike, BytesLike, string, AddressLike]
   ): string;
   encodeFunctionData(functionFragment: "name", values?: undefined): string;
+  encodeFunctionData(functionFragment: "oracle", values?: undefined): string;
   encodeFunctionData(functionFragment: "owner", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "ownerOf",
@@ -107,6 +139,10 @@ export interface ERC7857iNFTInterface extends Interface {
     values?: undefined
   ): string;
   encodeFunctionData(
+    functionFragment: "revokeUsage",
+    values: [BigNumberish, AddressLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "safeTransferFrom(address,address,uint256)",
     values: [AddressLike, AddressLike, BigNumberish]
   ): string;
@@ -115,12 +151,20 @@ export interface ERC7857iNFTInterface extends Interface {
     values: [AddressLike, AddressLike, BigNumberish, BytesLike]
   ): string;
   encodeFunctionData(
+    functionFragment: "secureTransfer",
+    values: [AddressLike, AddressLike, BigNumberish, BytesLike, BytesLike]
+  ): string;
+  encodeFunctionData(
     functionFragment: "setApprovalForAll",
     values: [AddressLike, boolean]
   ): string;
   encodeFunctionData(
-    functionFragment: "setExecutor",
-    values: [BigNumberish, AddressLike]
+    functionFragment: "setCloneable",
+    values: [BigNumberish, boolean]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setOracle",
+    values: [AddressLike]
   ): string;
   encodeFunctionData(
     functionFragment: "supportsInterface",
@@ -141,11 +185,17 @@ export interface ERC7857iNFTInterface extends Interface {
   ): string;
   encodeFunctionData(
     functionFragment: "updateMetadata",
-    values: [BigNumberish, BytesLike]
+    values: [BigNumberish, BytesLike, string]
   ): string;
 
   decodeFunctionResult(functionFragment: "approve", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "authorizeUsage",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "balanceOf", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "clone", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "cloneable", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "getAgentMetadata",
     data: BytesLike
@@ -155,15 +205,28 @@ export interface ERC7857iNFTInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
+    functionFragment: "getAuthorization",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
     functionFragment: "isApprovedForAll",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "isAuthorizedExecutor",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "mintAgent", data: BytesLike): Result;
   decodeFunctionResult(functionFragment: "name", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "oracle", data: BytesLike): Result;
   decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
   decodeFunctionResult(functionFragment: "ownerOf", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "renounceOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "revokeUsage",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -175,13 +238,18 @@ export interface ERC7857iNFTInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
+    functionFragment: "secureTransfer",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
     functionFragment: "setApprovalForAll",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "setExecutor",
+    functionFragment: "setCloneable",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(functionFragment: "setOracle", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "supportsInterface",
     data: BytesLike
@@ -200,6 +268,24 @@ export interface ERC7857iNFTInterface extends Interface {
     functionFragment: "updateMetadata",
     data: BytesLike
   ): Result;
+}
+
+export namespace AgentClonedEvent {
+  export type InputTuple = [
+    originalId: BigNumberish,
+    newId: BigNumberish,
+    to: AddressLike
+  ];
+  export type OutputTuple = [originalId: bigint, newId: bigint, to: string];
+  export interface OutputObject {
+    originalId: bigint;
+    newId: bigint;
+    to: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
 }
 
 export namespace ApprovalEvent {
@@ -242,12 +328,12 @@ export namespace ApprovalForAllEvent {
   export type LogDescription = TypedLogDescription<Event>;
 }
 
-export namespace ExecutorUpdatedEvent {
-  export type InputTuple = [tokenId: BigNumberish, executor: AddressLike];
-  export type OutputTuple = [tokenId: bigint, executor: string];
+export namespace MetadataUpdatedEvent {
+  export type InputTuple = [tokenId: BigNumberish, newHash: BytesLike];
+  export type OutputTuple = [tokenId: bigint, newHash: string];
   export interface OutputObject {
     tokenId: bigint;
-    executor: string;
+    newHash: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -255,17 +341,12 @@ export namespace ExecutorUpdatedEvent {
   export type LogDescription = TypedLogDescription<Event>;
 }
 
-export namespace MetadataUpdatedEvent {
-  export type InputTuple = [
-    tokenId: BigNumberish,
-    newHash: BytesLike,
-    updater: AddressLike
-  ];
-  export type OutputTuple = [tokenId: bigint, newHash: string, updater: string];
+export namespace OracleUpdatedEvent {
+  export type InputTuple = [oldOracle: AddressLike, newOracle: AddressLike];
+  export type OutputTuple = [oldOracle: string, newOracle: string];
   export interface OutputObject {
-    tokenId: bigint;
-    newHash: string;
-    updater: string;
+    oldOracle: string;
+    newOracle: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -297,6 +378,19 @@ export namespace TransferEvent {
     from: string;
     to: string;
     tokenId: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace UsageAuthorizedEvent {
+  export type InputTuple = [tokenId: BigNumberish, executor: AddressLike];
+  export type OutputTuple = [tokenId: bigint, executor: string];
+  export interface OutputObject {
+    tokenId: bigint;
+    executor: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -353,7 +447,26 @@ export interface ERC7857iNFT extends BaseContract {
     "nonpayable"
   >;
 
+  authorizeUsage: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike, permissions: BytesLike],
+    [void],
+    "nonpayable"
+  >;
+
   balanceOf: TypedContractMethod<[owner: AddressLike], [bigint], "view">;
+
+  clone: TypedContractMethod<
+    [
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [bigint],
+    "nonpayable"
+  >;
+
+  cloneable: TypedContractMethod<[arg0: BigNumberish], [boolean], "view">;
 
   getAgentMetadata: TypedContractMethod<
     [tokenId: BigNumberish],
@@ -363,25 +476,50 @@ export interface ERC7857iNFT extends BaseContract {
 
   getApproved: TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
 
+  getAuthorization: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [string],
+    "view"
+  >;
+
   isApprovedForAll: TypedContractMethod<
     [owner: AddressLike, operator: AddressLike],
     [boolean],
     "view"
   >;
 
+  isAuthorizedExecutor: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [boolean],
+    "view"
+  >;
+
   mintAgent: TypedContractMethod<
-    [to: AddressLike, initialMetadataHash: BytesLike, executor: AddressLike],
+    [
+      to: AddressLike,
+      metadataHash: BytesLike,
+      encryptedURI: string,
+      initialExecutor: AddressLike
+    ],
     [bigint],
     "nonpayable"
   >;
 
   name: TypedContractMethod<[], [string], "view">;
 
+  oracle: TypedContractMethod<[], [string], "view">;
+
   owner: TypedContractMethod<[], [string], "view">;
 
   ownerOf: TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
 
   renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
+
+  revokeUsage: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [void],
+    "nonpayable"
+  >;
 
   "safeTransferFrom(address,address,uint256)": TypedContractMethod<
     [from: AddressLike, to: AddressLike, tokenId: BigNumberish],
@@ -400,17 +538,31 @@ export interface ERC7857iNFT extends BaseContract {
     "nonpayable"
   >;
 
+  secureTransfer: TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+
   setApprovalForAll: TypedContractMethod<
     [operator: AddressLike, approved: boolean],
     [void],
     "nonpayable"
   >;
 
-  setExecutor: TypedContractMethod<
-    [tokenId: BigNumberish, executor: AddressLike],
+  setCloneable: TypedContractMethod<
+    [tokenId: BigNumberish, enabled: boolean],
     [void],
     "nonpayable"
   >;
+
+  setOracle: TypedContractMethod<[_oracle: AddressLike], [void], "nonpayable">;
 
   supportsInterface: TypedContractMethod<
     [interfaceId: BytesLike],
@@ -435,7 +587,7 @@ export interface ERC7857iNFT extends BaseContract {
   >;
 
   updateMetadata: TypedContractMethod<
-    [tokenId: BigNumberish, newMetadataHash: BytesLike],
+    [tokenId: BigNumberish, newHash: BytesLike, newEncryptedURI: string],
     [void],
     "nonpayable"
   >;
@@ -452,8 +604,30 @@ export interface ERC7857iNFT extends BaseContract {
     "nonpayable"
   >;
   getFunction(
+    nameOrSignature: "authorizeUsage"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike, permissions: BytesLike],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
     nameOrSignature: "balanceOf"
   ): TypedContractMethod<[owner: AddressLike], [bigint], "view">;
+  getFunction(
+    nameOrSignature: "clone"
+  ): TypedContractMethod<
+    [
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [bigint],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "cloneable"
+  ): TypedContractMethod<[arg0: BigNumberish], [boolean], "view">;
   getFunction(
     nameOrSignature: "getAgentMetadata"
   ): TypedContractMethod<
@@ -465,6 +639,13 @@ export interface ERC7857iNFT extends BaseContract {
     nameOrSignature: "getApproved"
   ): TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
   getFunction(
+    nameOrSignature: "getAuthorization"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [string],
+    "view"
+  >;
+  getFunction(
     nameOrSignature: "isApprovedForAll"
   ): TypedContractMethod<
     [owner: AddressLike, operator: AddressLike],
@@ -472,14 +653,29 @@ export interface ERC7857iNFT extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "isAuthorizedExecutor"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [boolean],
+    "view"
+  >;
+  getFunction(
     nameOrSignature: "mintAgent"
   ): TypedContractMethod<
-    [to: AddressLike, initialMetadataHash: BytesLike, executor: AddressLike],
+    [
+      to: AddressLike,
+      metadataHash: BytesLike,
+      encryptedURI: string,
+      initialExecutor: AddressLike
+    ],
     [bigint],
     "nonpayable"
   >;
   getFunction(
     nameOrSignature: "name"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
+    nameOrSignature: "oracle"
   ): TypedContractMethod<[], [string], "view">;
   getFunction(
     nameOrSignature: "owner"
@@ -490,6 +686,13 @@ export interface ERC7857iNFT extends BaseContract {
   getFunction(
     nameOrSignature: "renounceOwnership"
   ): TypedContractMethod<[], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "revokeUsage"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [void],
+    "nonpayable"
+  >;
   getFunction(
     nameOrSignature: "safeTransferFrom(address,address,uint256)"
   ): TypedContractMethod<
@@ -510,6 +713,19 @@ export interface ERC7857iNFT extends BaseContract {
     "nonpayable"
   >;
   getFunction(
+    nameOrSignature: "secureTransfer"
+  ): TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
     nameOrSignature: "setApprovalForAll"
   ): TypedContractMethod<
     [operator: AddressLike, approved: boolean],
@@ -517,12 +733,15 @@ export interface ERC7857iNFT extends BaseContract {
     "nonpayable"
   >;
   getFunction(
-    nameOrSignature: "setExecutor"
+    nameOrSignature: "setCloneable"
   ): TypedContractMethod<
-    [tokenId: BigNumberish, executor: AddressLike],
+    [tokenId: BigNumberish, enabled: boolean],
     [void],
     "nonpayable"
   >;
+  getFunction(
+    nameOrSignature: "setOracle"
+  ): TypedContractMethod<[_oracle: AddressLike], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "supportsInterface"
   ): TypedContractMethod<[interfaceId: BytesLike], [boolean], "view">;
@@ -545,11 +764,18 @@ export interface ERC7857iNFT extends BaseContract {
   getFunction(
     nameOrSignature: "updateMetadata"
   ): TypedContractMethod<
-    [tokenId: BigNumberish, newMetadataHash: BytesLike],
+    [tokenId: BigNumberish, newHash: BytesLike, newEncryptedURI: string],
     [void],
     "nonpayable"
   >;
 
+  getEvent(
+    key: "AgentCloned"
+  ): TypedContractEvent<
+    AgentClonedEvent.InputTuple,
+    AgentClonedEvent.OutputTuple,
+    AgentClonedEvent.OutputObject
+  >;
   getEvent(
     key: "Approval"
   ): TypedContractEvent<
@@ -565,18 +791,18 @@ export interface ERC7857iNFT extends BaseContract {
     ApprovalForAllEvent.OutputObject
   >;
   getEvent(
-    key: "ExecutorUpdated"
-  ): TypedContractEvent<
-    ExecutorUpdatedEvent.InputTuple,
-    ExecutorUpdatedEvent.OutputTuple,
-    ExecutorUpdatedEvent.OutputObject
-  >;
-  getEvent(
     key: "MetadataUpdated"
   ): TypedContractEvent<
     MetadataUpdatedEvent.InputTuple,
     MetadataUpdatedEvent.OutputTuple,
     MetadataUpdatedEvent.OutputObject
+  >;
+  getEvent(
+    key: "OracleUpdated"
+  ): TypedContractEvent<
+    OracleUpdatedEvent.InputTuple,
+    OracleUpdatedEvent.OutputTuple,
+    OracleUpdatedEvent.OutputObject
   >;
   getEvent(
     key: "OwnershipTransferred"
@@ -592,8 +818,26 @@ export interface ERC7857iNFT extends BaseContract {
     TransferEvent.OutputTuple,
     TransferEvent.OutputObject
   >;
+  getEvent(
+    key: "UsageAuthorized"
+  ): TypedContractEvent<
+    UsageAuthorizedEvent.InputTuple,
+    UsageAuthorizedEvent.OutputTuple,
+    UsageAuthorizedEvent.OutputObject
+  >;
 
   filters: {
+    "AgentCloned(uint256,uint256,address)": TypedContractEvent<
+      AgentClonedEvent.InputTuple,
+      AgentClonedEvent.OutputTuple,
+      AgentClonedEvent.OutputObject
+    >;
+    AgentCloned: TypedContractEvent<
+      AgentClonedEvent.InputTuple,
+      AgentClonedEvent.OutputTuple,
+      AgentClonedEvent.OutputObject
+    >;
+
     "Approval(address,address,uint256)": TypedContractEvent<
       ApprovalEvent.InputTuple,
       ApprovalEvent.OutputTuple,
@@ -616,18 +860,7 @@ export interface ERC7857iNFT extends BaseContract {
       ApprovalForAllEvent.OutputObject
     >;
 
-    "ExecutorUpdated(uint256,address)": TypedContractEvent<
-      ExecutorUpdatedEvent.InputTuple,
-      ExecutorUpdatedEvent.OutputTuple,
-      ExecutorUpdatedEvent.OutputObject
-    >;
-    ExecutorUpdated: TypedContractEvent<
-      ExecutorUpdatedEvent.InputTuple,
-      ExecutorUpdatedEvent.OutputTuple,
-      ExecutorUpdatedEvent.OutputObject
-    >;
-
-    "MetadataUpdated(uint256,bytes32,address)": TypedContractEvent<
+    "MetadataUpdated(uint256,bytes32)": TypedContractEvent<
       MetadataUpdatedEvent.InputTuple,
       MetadataUpdatedEvent.OutputTuple,
       MetadataUpdatedEvent.OutputObject
@@ -636,6 +869,17 @@ export interface ERC7857iNFT extends BaseContract {
       MetadataUpdatedEvent.InputTuple,
       MetadataUpdatedEvent.OutputTuple,
       MetadataUpdatedEvent.OutputObject
+    >;
+
+    "OracleUpdated(address,address)": TypedContractEvent<
+      OracleUpdatedEvent.InputTuple,
+      OracleUpdatedEvent.OutputTuple,
+      OracleUpdatedEvent.OutputObject
+    >;
+    OracleUpdated: TypedContractEvent<
+      OracleUpdatedEvent.InputTuple,
+      OracleUpdatedEvent.OutputTuple,
+      OracleUpdatedEvent.OutputObject
     >;
 
     "OwnershipTransferred(address,address)": TypedContractEvent<
@@ -658,6 +902,17 @@ export interface ERC7857iNFT extends BaseContract {
       TransferEvent.InputTuple,
       TransferEvent.OutputTuple,
       TransferEvent.OutputObject
+    >;
+
+    "UsageAuthorized(uint256,address)": TypedContractEvent<
+      UsageAuthorizedEvent.InputTuple,
+      UsageAuthorizedEvent.OutputTuple,
+      UsageAuthorizedEvent.OutputObject
+    >;
+    UsageAuthorized: TypedContractEvent<
+      UsageAuthorizedEvent.InputTuple,
+      UsageAuthorizedEvent.OutputTuple,
+      UsageAuthorizedEvent.OutputObject
     >;
   };
 }

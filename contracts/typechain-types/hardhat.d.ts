@@ -85,6 +85,14 @@ declare module "hardhat/types/runtime" {
       name: "IERC7857",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.IERC7857__factory>;
+    getContractFactory(
+      name: "IOracle",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IOracle__factory>;
+    getContractFactory(
+      name: "MockOracle",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.MockOracle__factory>;
 
     getContractAt(
       name: "Ownable",
@@ -176,6 +184,16 @@ declare module "hardhat/types/runtime" {
       address: string | ethers.Addressable,
       signer?: ethers.Signer
     ): Promise<Contracts.IERC7857>;
+    getContractAt(
+      name: "IOracle",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IOracle>;
+    getContractAt(
+      name: "MockOracle",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.MockOracle>;
 
     deployContract(
       name: "Ownable",
@@ -249,6 +267,14 @@ declare module "hardhat/types/runtime" {
       name: "IERC7857",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.IERC7857>;
+    deployContract(
+      name: "IOracle",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IOracle>;
+    deployContract(
+      name: "MockOracle",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.MockOracle>;
 
     deployContract(
       name: "Ownable",
@@ -340,6 +366,16 @@ declare module "hardhat/types/runtime" {
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.IERC7857>;
+    deployContract(
+      name: "IOracle",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IOracle>;
+    deployContract(
+      name: "MockOracle",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.MockOracle>;
 
     // default types
     getContractFactory(

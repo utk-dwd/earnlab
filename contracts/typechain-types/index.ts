@@ -42,3 +42,7 @@ export type { IAgentRegistry } from "./contracts/interfaces/IAgentRegistry";
 export { IAgentRegistry__factory } from "./factories/contracts/interfaces/IAgentRegistry__factory";
 export type { IERC7857 } from "./contracts/interfaces/IERC7857";
 export { IERC7857__factory } from "./factories/contracts/interfaces/IERC7857__factory";
+export type { IOracle } from "./contracts/MockOracle.sol/IOracle";
+export { IOracle__factory } from "./factories/contracts/MockOracle.sol/IOracle__factory";
+export type { MockOracle } from "./contracts/MockOracle.sol/MockOracle";
+export { MockOracle__factory } from "./factories/contracts/MockOracle.sol/MockOracle__factory";

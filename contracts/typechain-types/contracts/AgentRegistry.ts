@@ -23,7 +23,7 @@ import type {
   TypedContractMethod,
 } from "../common";
 
-export declare namespace IAgentRegistry {
+export declare namespace AgentRegistry {
   export type AgentStruct = {
     inftTokenId: BigNumberish;
     owner: AddressLike;
@@ -241,7 +241,7 @@ export interface AgentRegistry extends BaseContract {
 
   getAgent: TypedContractMethod<
     [agentId: BigNumberish],
-    [IAgentRegistry.AgentStructOutput],
+    [AgentRegistry.AgentStructOutput],
     "view"
   >;
 
@@ -289,7 +289,7 @@ export interface AgentRegistry extends BaseContract {
     nameOrSignature: "getAgent"
   ): TypedContractMethod<
     [agentId: BigNumberish],
-    [IAgentRegistry.AgentStructOutput],
+    [AgentRegistry.AgentStructOutput],
     "view"
   >;
   getFunction(

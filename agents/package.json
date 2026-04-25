@@ -1,7 +1,11 @@
 {
   "name": "@earnlab/agents",
   "version": "0.1.0",
-  "scripts": { "start": "ts-node src/index.ts", "build": "tsc", "test": "jest" },
+  "scripts": {
+    "start": "node init && ts-node src/index.ts",
+    "build": "node init && tsc",
+    "test": "jest"
+  },
   "dependencies": {
     "@uniswap/v3-sdk": "^3.13.0",
     "@uniswap/sdk-core": "^5.3.0",
