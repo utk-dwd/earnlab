@@ -26,54 +26,184 @@ import type {
 export declare namespace IERC7857 {
   export type AgentMetadataStruct = {
     metadataHash: BytesLike;
+    encryptedURI: string;
     lastUpdated: BigNumberish;
-    authorizedUpdater: AddressLike;
   };
 
   export type AgentMetadataStructOutput = [
     metadataHash: string,
-    lastUpdated: bigint,
-    authorizedUpdater: string
-  ] & { metadataHash: string; lastUpdated: bigint; authorizedUpdater: string };
+    encryptedURI: string,
+    lastUpdated: bigint
+  ] & { metadataHash: string; encryptedURI: string; lastUpdated: bigint };
 }
 
 export interface IERC7857Interface extends Interface {
   getFunction(
     nameOrSignature:
+      | "approve"
+      | "authorizeUsage"
+      | "balanceOf"
+      | "clone"
       | "getAgentMetadata"
+      | "getApproved"
+      | "getAuthorization"
+      | "isApprovedForAll"
+      | "isAuthorizedExecutor"
       | "mintAgent"
-      | "setExecutor"
+      | "ownerOf"
+      | "revokeUsage"
+      | "safeTransferFrom(address,address,uint256)"
+      | "safeTransferFrom(address,address,uint256,bytes)"
+      | "secureTransfer"
+      | "setApprovalForAll"
+      | "supportsInterface"
+      | "transferFrom"
       | "updateMetadata"
   ): FunctionFragment;
 
   getEvent(
-    nameOrSignatureOrTopic: "ExecutorUpdated" | "MetadataUpdated"
+    nameOrSignatureOrTopic:
+      | "AgentCloned"
+      | "Approval"
+      | "ApprovalForAll"
+      | "MetadataUpdated"
+      | "OracleUpdated"
+      | "Transfer"
+      | "UsageAuthorized"
   ): EventFragment;
 
+  encodeFunctionData(
+    functionFragment: "approve",
+    values: [AddressLike, BigNumberish]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "authorizeUsage",
+    values: [BigNumberish, AddressLike, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "balanceOf",
+    values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "clone",
+    values: [AddressLike, BigNumberish, BytesLike, BytesLike]
+  ): string;
   encodeFunctionData(
     functionFragment: "getAgentMetadata",
     values: [BigNumberish]
   ): string;
   encodeFunctionData(
-    functionFragment: "mintAgent",
-    values: [AddressLike, BytesLike, AddressLike]
+    functionFragment: "getApproved",
+    values: [BigNumberish]
   ): string;
   encodeFunctionData(
-    functionFragment: "setExecutor",
+    functionFragment: "getAuthorization",
     values: [BigNumberish, AddressLike]
   ): string;
   encodeFunctionData(
+    functionFragment: "isApprovedForAll",
+    values: [AddressLike, AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "isAuthorizedExecutor",
+    values: [BigNumberish, AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "mintAgent",
+    values: [AddressLike, BytesLike, string, AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "ownerOf",
+    values: [BigNumberish]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "revokeUsage",
+    values: [BigNumberish, AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "safeTransferFrom(address,address,uint256)",
+    values: [AddressLike, AddressLike, BigNumberish]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "safeTransferFrom(address,address,uint256,bytes)",
+    values: [AddressLike, AddressLike, BigNumberish, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "secureTransfer",
+    values: [AddressLike, AddressLike, BigNumberish, BytesLike, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setApprovalForAll",
+    values: [AddressLike, boolean]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "supportsInterface",
+    values: [BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "transferFrom",
+    values: [AddressLike, AddressLike, BigNumberish]
+  ): string;
+  encodeFunctionData(
     functionFragment: "updateMetadata",
-    values: [BigNumberish, BytesLike]
+    values: [BigNumberish, BytesLike, string]
   ): string;
 
+  decodeFunctionResult(functionFragment: "approve", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "authorizeUsage",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(functionFragment: "balanceOf", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "clone", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "getAgentMetadata",
     data: BytesLike
   ): Result;
-  decodeFunctionResult(functionFragment: "mintAgent", data: BytesLike): Result;
   decodeFunctionResult(
-    functionFragment: "setExecutor",
+    functionFragment: "getApproved",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "getAuthorization",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "isApprovedForAll",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "isAuthorizedExecutor",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(functionFragment: "mintAgent", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "ownerOf", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "revokeUsage",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "safeTransferFrom(address,address,uint256)",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "safeTransferFrom(address,address,uint256,bytes)",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "secureTransfer",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setApprovalForAll",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "supportsInterface",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "transferFrom",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -82,12 +212,57 @@ export interface IERC7857Interface extends Interface {
   ): Result;
 }
 
-export namespace ExecutorUpdatedEvent {
-  export type InputTuple = [tokenId: BigNumberish, executor: AddressLike];
-  export type OutputTuple = [tokenId: bigint, executor: string];
+export namespace AgentClonedEvent {
+  export type InputTuple = [
+    originalId: BigNumberish,
+    newId: BigNumberish,
+    to: AddressLike
+  ];
+  export type OutputTuple = [originalId: bigint, newId: bigint, to: string];
   export interface OutputObject {
+    originalId: bigint;
+    newId: bigint;
+    to: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace ApprovalEvent {
+  export type InputTuple = [
+    owner: AddressLike,
+    approved: AddressLike,
+    tokenId: BigNumberish
+  ];
+  export type OutputTuple = [owner: string, approved: string, tokenId: bigint];
+  export interface OutputObject {
+    owner: string;
+    approved: string;
     tokenId: bigint;
-    executor: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace ApprovalForAllEvent {
+  export type InputTuple = [
+    owner: AddressLike,
+    operator: AddressLike,
+    approved: boolean
+  ];
+  export type OutputTuple = [
+    owner: string,
+    operator: string,
+    approved: boolean
+  ];
+  export interface OutputObject {
+    owner: string;
+    operator: string;
+    approved: boolean;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -96,16 +271,55 @@ export namespace ExecutorUpdatedEvent {
 }
 
 export namespace MetadataUpdatedEvent {
-  export type InputTuple = [
-    tokenId: BigNumberish,
-    newHash: BytesLike,
-    updater: AddressLike
-  ];
-  export type OutputTuple = [tokenId: bigint, newHash: string, updater: string];
+  export type InputTuple = [tokenId: BigNumberish, newHash: BytesLike];
+  export type OutputTuple = [tokenId: bigint, newHash: string];
   export interface OutputObject {
     tokenId: bigint;
     newHash: string;
-    updater: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace OracleUpdatedEvent {
+  export type InputTuple = [oldOracle: AddressLike, newOracle: AddressLike];
+  export type OutputTuple = [oldOracle: string, newOracle: string];
+  export interface OutputObject {
+    oldOracle: string;
+    newOracle: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace TransferEvent {
+  export type InputTuple = [
+    from: AddressLike,
+    to: AddressLike,
+    tokenId: BigNumberish
+  ];
+  export type OutputTuple = [from: string, to: string, tokenId: bigint];
+  export interface OutputObject {
+    from: string;
+    to: string;
+    tokenId: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace UsageAuthorizedEvent {
+  export type InputTuple = [tokenId: BigNumberish, executor: AddressLike];
+  export type OutputTuple = [tokenId: bigint, executor: string];
+  export interface OutputObject {
+    tokenId: bigint;
+    executor: string;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -156,26 +370,125 @@ export interface IERC7857 extends BaseContract {
     event?: TCEvent
   ): Promise<this>;
 
+  approve: TypedContractMethod<
+    [to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+
+  authorizeUsage: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike, permissions: BytesLike],
+    [void],
+    "nonpayable"
+  >;
+
+  balanceOf: TypedContractMethod<[owner: AddressLike], [bigint], "view">;
+
+  clone: TypedContractMethod<
+    [
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [bigint],
+    "nonpayable"
+  >;
+
   getAgentMetadata: TypedContractMethod<
     [tokenId: BigNumberish],
     [IERC7857.AgentMetadataStructOutput],
     "view"
   >;
 
+  getApproved: TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
+
+  getAuthorization: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [string],
+    "view"
+  >;
+
+  isApprovedForAll: TypedContractMethod<
+    [owner: AddressLike, operator: AddressLike],
+    [boolean],
+    "view"
+  >;
+
+  isAuthorizedExecutor: TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [boolean],
+    "view"
+  >;
+
   mintAgent: TypedContractMethod<
-    [to: AddressLike, initialMetadataHash: BytesLike, executor: AddressLike],
+    [
+      to: AddressLike,
+      metadataHash: BytesLike,
+      encryptedURI: string,
+      initialExecutor: AddressLike
+    ],
     [bigint],
     "nonpayable"
   >;
 
-  setExecutor: TypedContractMethod<
+  ownerOf: TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
+
+  revokeUsage: TypedContractMethod<
     [tokenId: BigNumberish, executor: AddressLike],
     [void],
     "nonpayable"
   >;
 
+  "safeTransferFrom(address,address,uint256)": TypedContractMethod<
+    [from: AddressLike, to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+
+  "safeTransferFrom(address,address,uint256,bytes)": TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      data: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+
+  secureTransfer: TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+
+  setApprovalForAll: TypedContractMethod<
+    [operator: AddressLike, approved: boolean],
+    [void],
+    "nonpayable"
+  >;
+
+  supportsInterface: TypedContractMethod<
+    [interfaceId: BytesLike],
+    [boolean],
+    "view"
+  >;
+
+  transferFrom: TypedContractMethod<
+    [from: AddressLike, to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+
   updateMetadata: TypedContractMethod<
-    [tokenId: BigNumberish, newMetadataHash: BytesLike],
+    [tokenId: BigNumberish, newHash: BytesLike, newEncryptedURI: string],
     [void],
     "nonpayable"
   >;
@@ -185,6 +498,35 @@ export interface IERC7857 extends BaseContract {
   ): T;
 
   getFunction(
+    nameOrSignature: "approve"
+  ): TypedContractMethod<
+    [to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "authorizeUsage"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike, permissions: BytesLike],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "balanceOf"
+  ): TypedContractMethod<[owner: AddressLike], [bigint], "view">;
+  getFunction(
+    nameOrSignature: "clone"
+  ): TypedContractMethod<
+    [
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [bigint],
+    "nonpayable"
+  >;
+  getFunction(
     nameOrSignature: "getAgentMetadata"
   ): TypedContractMethod<
     [tokenId: BigNumberish],
@@ -192,33 +534,128 @@ export interface IERC7857 extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "getApproved"
+  ): TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
+  getFunction(
+    nameOrSignature: "getAuthorization"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [string],
+    "view"
+  >;
+  getFunction(
+    nameOrSignature: "isApprovedForAll"
+  ): TypedContractMethod<
+    [owner: AddressLike, operator: AddressLike],
+    [boolean],
+    "view"
+  >;
+  getFunction(
+    nameOrSignature: "isAuthorizedExecutor"
+  ): TypedContractMethod<
+    [tokenId: BigNumberish, executor: AddressLike],
+    [boolean],
+    "view"
+  >;
+  getFunction(
     nameOrSignature: "mintAgent"
   ): TypedContractMethod<
-    [to: AddressLike, initialMetadataHash: BytesLike, executor: AddressLike],
+    [
+      to: AddressLike,
+      metadataHash: BytesLike,
+      encryptedURI: string,
+      initialExecutor: AddressLike
+    ],
     [bigint],
     "nonpayable"
   >;
   getFunction(
-    nameOrSignature: "setExecutor"
+    nameOrSignature: "ownerOf"
+  ): TypedContractMethod<[tokenId: BigNumberish], [string], "view">;
+  getFunction(
+    nameOrSignature: "revokeUsage"
   ): TypedContractMethod<
     [tokenId: BigNumberish, executor: AddressLike],
     [void],
     "nonpayable"
   >;
   getFunction(
+    nameOrSignature: "safeTransferFrom(address,address,uint256)"
+  ): TypedContractMethod<
+    [from: AddressLike, to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "safeTransferFrom(address,address,uint256,bytes)"
+  ): TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      data: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "secureTransfer"
+  ): TypedContractMethod<
+    [
+      from: AddressLike,
+      to: AddressLike,
+      tokenId: BigNumberish,
+      sealedKey: BytesLike,
+      proof: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "setApprovalForAll"
+  ): TypedContractMethod<
+    [operator: AddressLike, approved: boolean],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "supportsInterface"
+  ): TypedContractMethod<[interfaceId: BytesLike], [boolean], "view">;
+  getFunction(
+    nameOrSignature: "transferFrom"
+  ): TypedContractMethod<
+    [from: AddressLike, to: AddressLike, tokenId: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
     nameOrSignature: "updateMetadata"
   ): TypedContractMethod<
-    [tokenId: BigNumberish, newMetadataHash: BytesLike],
+    [tokenId: BigNumberish, newHash: BytesLike, newEncryptedURI: string],
     [void],
     "nonpayable"
   >;
 
   getEvent(
-    key: "ExecutorUpdated"
+    key: "AgentCloned"
   ): TypedContractEvent<
-    ExecutorUpdatedEvent.InputTuple,
-    ExecutorUpdatedEvent.OutputTuple,
-    ExecutorUpdatedEvent.OutputObject
+    AgentClonedEvent.InputTuple,
+    AgentClonedEvent.OutputTuple,
+    AgentClonedEvent.OutputObject
+  >;
+  getEvent(
+    key: "Approval"
+  ): TypedContractEvent<
+    ApprovalEvent.InputTuple,
+    ApprovalEvent.OutputTuple,
+    ApprovalEvent.OutputObject
+  >;
+  getEvent(
+    key: "ApprovalForAll"
+  ): TypedContractEvent<
+    ApprovalForAllEvent.InputTuple,
+    ApprovalForAllEvent.OutputTuple,
+    ApprovalForAllEvent.OutputObject
   >;
   getEvent(
     key: "MetadataUpdated"
@@ -227,20 +664,63 @@ export interface IERC7857 extends BaseContract {
     MetadataUpdatedEvent.OutputTuple,
     MetadataUpdatedEvent.OutputObject
   >;
+  getEvent(
+    key: "OracleUpdated"
+  ): TypedContractEvent<
+    OracleUpdatedEvent.InputTuple,
+    OracleUpdatedEvent.OutputTuple,
+    OracleUpdatedEvent.OutputObject
+  >;
+  getEvent(
+    key: "Transfer"
+  ): TypedContractEvent<
+    TransferEvent.InputTuple,
+    TransferEvent.OutputTuple,
+    TransferEvent.OutputObject
+  >;
+  getEvent(
+    key: "UsageAuthorized"
+  ): TypedContractEvent<
+    UsageAuthorizedEvent.InputTuple,
+    UsageAuthorizedEvent.OutputTuple,
+    UsageAuthorizedEvent.OutputObject
+  >;
 
   filters: {
-    "ExecutorUpdated(uint256,address)": TypedContractEvent<
-      ExecutorUpdatedEvent.InputTuple,
-      ExecutorUpdatedEvent.OutputTuple,
-      ExecutorUpdatedEvent.OutputObject
+    "AgentCloned(uint256,uint256,address)": TypedContractEvent<
+      AgentClonedEvent.InputTuple,
+      AgentClonedEvent.OutputTuple,
+      AgentClonedEvent.OutputObject
     >;
-    ExecutorUpdated: TypedContractEvent<
-      ExecutorUpdatedEvent.InputTuple,
-      ExecutorUpdatedEvent.OutputTuple,
-      ExecutorUpdatedEvent.OutputObject
+    AgentCloned: TypedContractEvent<
+      AgentClonedEvent.InputTuple,
+      AgentClonedEvent.OutputTuple,
+      AgentClonedEvent.OutputObject
     >;
 
-    "MetadataUpdated(uint256,bytes32,address)": TypedContractEvent<
+    "Approval(address,address,uint256)": TypedContractEvent<
+      ApprovalEvent.InputTuple,
+      ApprovalEvent.OutputTuple,
+      ApprovalEvent.OutputObject
+    >;
+    Approval: TypedContractEvent<
+      ApprovalEvent.InputTuple,
+      ApprovalEvent.OutputTuple,
+      ApprovalEvent.OutputObject
+    >;
+
+    "ApprovalForAll(address,address,bool)": TypedContractEvent<
+      ApprovalForAllEvent.InputTuple,
+      ApprovalForAllEvent.OutputTuple,
+      ApprovalForAllEvent.OutputObject
+    >;
+    ApprovalForAll: TypedContractEvent<
+      ApprovalForAllEvent.InputTuple,
+      ApprovalForAllEvent.OutputTuple,
+      ApprovalForAllEvent.OutputObject
+    >;
+
+    "MetadataUpdated(uint256,bytes32)": TypedContractEvent<
       MetadataUpdatedEvent.InputTuple,
       MetadataUpdatedEvent.OutputTuple,
       MetadataUpdatedEvent.OutputObject
@@ -249,6 +729,39 @@ export interface IERC7857 extends BaseContract {
       MetadataUpdatedEvent.InputTuple,
       MetadataUpdatedEvent.OutputTuple,
       MetadataUpdatedEvent.OutputObject
+    >;
+
+    "OracleUpdated(address,address)": TypedContractEvent<
+      OracleUpdatedEvent.InputTuple,
+      OracleUpdatedEvent.OutputTuple,
+      OracleUpdatedEvent.OutputObject
+    >;
+    OracleUpdated: TypedContractEvent<
+      OracleUpdatedEvent.InputTuple,
+      OracleUpdatedEvent.OutputTuple,
+      OracleUpdatedEvent.OutputObject
+    >;
+
+    "Transfer(address,address,uint256)": TypedContractEvent<
+      TransferEvent.InputTuple,
+      TransferEvent.OutputTuple,
+      TransferEvent.OutputObject
+    >;
+    Transfer: TypedContractEvent<
+      TransferEvent.InputTuple,
+      TransferEvent.OutputTuple,
+      TransferEvent.OutputObject
+    >;
+
+    "UsageAuthorized(uint256,address)": TypedContractEvent<
+      UsageAuthorizedEvent.InputTuple,
+      UsageAuthorizedEvent.OutputTuple,
+      UsageAuthorizedEvent.OutputObject
+    >;
+    UsageAuthorized: TypedContractEvent<
+      UsageAuthorizedEvent.InputTuple,
+      UsageAuthorizedEvent.OutputTuple,
+      UsageAuthorizedEvent.OutputObject
     >;
   };
 }

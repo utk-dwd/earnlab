@@ -1,2 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+artifacts/
+cache/
+typechain-types/
+
+# Environment files — NEVER commit these
 .env
-node_modules
+.env.local
+.env.*.local
+.env.production
+
+# Hardhat
+contracts/artifacts/
+contracts/cache/
+contracts/ignition/deployments/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Misc scripts (local only)
+bootstrap.sh
+redesign.sh
+inft-upgrade.sh
+wire-frontend.sh
+fix-frontend.sh
+fix-chainid.sh
+add-register.sh
+push-to-github.sh
