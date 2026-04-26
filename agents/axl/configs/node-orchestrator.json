@@ -1,0 +1,7 @@
+{
+  "PrivateKeyPath": "keys/orchestrator.pem",
+  "Peers": [],
+  "Listen": ["tls://0.0.0.0:7000"],
+  "api_port": 9002,
+  "tcp_port": 7000
+}

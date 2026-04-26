@@ -1,0 +1,15 @@
+{
+  "name": "earngen",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "contracts",
+    "agents",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "node init && npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "deploy": "bash scripts/deploy-all.sh"
+  }
+}

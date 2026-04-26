@@ -1,0 +1,7 @@
+{
+  "PrivateKeyPath": "keys/agent2.pem",
+  "Peers": ["tls://127.0.0.1:7000"],
+  "Listen": ["tls://0.0.0.0:7002"],
+  "api_port": 9004,
+  "tcp_port": 7000
+}
