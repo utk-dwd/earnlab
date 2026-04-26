@@ -1,0 +1,9 @@
+{
+  "PrivateKeyPath": "keys/executor.pem",
+  "Peers": ["tls://127.0.0.1:7000"],
+  "Listen": ["tls://0.0.0.0:7003"],
+  "api_port": 9005,
+  "tcp_port": 7000,
+  "a2a_addr": "http://127.0.0.1",
+  "a2a_port": 9105
+}

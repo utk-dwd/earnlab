@@ -1,0 +1,30 @@
+{
+  "name": "@earngen/agents",
+  "version": "0.1.0",
+  "scripts": {
+    "orchestrator": "ts-node src/orchestrator/index.ts",
+    "agent1": "ts-node src/tasks/agent1.ts",
+    "agent2": "ts-node src/tasks/agent2.ts",
+    "build": "tsc",
+    "executor": "ts-node src/portfolio/executor.ts",
+    "seeker": "ts-node src/portfolio/seeker.ts",
+    "critic": "ts-node src/portfolio/critic.ts",
+    "portfolio-manager": "ts-node src/portfolio/portfoliomanager.ts",
+    "yield-hunter": "ts-node src/portfolio/yieldhunter.ts",
+    "risk-manager": "ts-node src/portfolio/riskmanager.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.11.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.4.0",
+    "uuid": "^9.0.0",
+    "@uniswap/v3-sdk": "^3.13.0",
+    "@uniswap/sdk-core": "^5.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0"
+  }
+}
