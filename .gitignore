@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Environment — NEVER commit real credentials
+.env
+.env.local
+.env.*.local
+
+# AXL private key material — regenerate with openssl genpkey
+agents/axl/keys/*.pem
+
+# AXL runtime
+agents/axl/node
+agents/axl/logs/*.log
+
+# Hardhat artifacts & cache
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+
+# TypeScript
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

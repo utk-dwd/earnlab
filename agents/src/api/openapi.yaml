@@ -1,0 +1,380 @@
+openapi: 3.0.3
+info:
+  title: EarnGen Yield Hunter API
+  description: |
+    Real-time DeFi yield discovery across Uniswap v4 testnets.
+    Scans Sepolia, Base Sepolia, Arbitrum Sepolia, and Unichain Sepolia every 60 s.
+
+    ## APY Sources
+    - **live** — computed on-chain from `StateView` (liquidity, price) + `PoolManager.Swap` events (24h volume)
+    - **reference** — mainnet equivalent from DefiLlama (used when testnet volume is ~0)
+
+    ## Slippage Protection
+    The `/slippage/check` endpoint uses the v4 `Quoter` contract to simulate the exact
+    output before execution. Always check this before calling `UniversalRouter`.
+  version: 1.0.0
+  contact:
+    name: EarnGen
+    url: https://github.com/your-org/earngen
+
+servers:
+  - url: http://localhost:3001
+    description: Local agent API
+
+tags:
+  - name: yields
+    description: Ranked yield opportunities
+  - name: positions
+    description: Open and historical liquidity positions
+  - name: executions
+    description: On-chain execution history
+  - name: slippage
+    description: Pre-trade slippage simulation
+  - name: meta
+    description: Chain config and health
+
+paths:
+  /yields:
+    get:
+      tags: [yields]
+      summary: Get ranked yield opportunities
+      description: |
+        Returns all discovered pools sorted by `displayAPY` (live APY if available,
+        reference APY otherwise). Pools with zero liquidity are filtered out.
+      parameters:
+        - name: network
+          in: query
+          description: Filter by network environment
+          schema:
+            type: string
+            enum: [mainnet, testnet]
+        - name: chainId
+          in: query
+          description: Filter to a specific chain
+          schema:
+            type: integer
+            example: 11155111
+        - name: minAPY
+          in: query
+          description: Minimum displayAPY (%)
+          schema:
+            type: number
+            example: 5
+        - name: limit
+          in: query
+          description: Max results (1–100)
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: Ranked opportunities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/RankedOpportunity" }
+              example:
+                count: 4
+                data:
+                  - rank: 1
+                    chainName: "Sepolia"
+                    pair: "WETH/USDC"
+                    feeTierLabel: "0.30%"
+                    liveAPY: 0
+                    referenceAPY: 23.47
+                    displayAPY: 23.47
+                    apySource: "reference"
+                    risk: "medium"
+                    tvlUsd: 8430
+
+  /yields/{poolId}:
+    get:
+      tags: [yields]
+      summary: Get a single pool opportunity
+      parameters:
+        - name: poolId
+          in: path
+          required: true
+          schema:
+            type: string
+            description: keccak256(abi.encode(poolKey)) — 32-byte hex
+            example: "0xabc123..."
+      responses:
+        "200":
+          description: Pool data
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RankedOpportunity" }
+        "404":
+          description: Pool not in latest scan
+
+  /positions:
+    get:
+      tags: [positions]
+      summary: Get open positions
+      description: Returns all positions with status=open and their live PnL.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Position" }
+
+  /positions/all:
+    get:
+      tags: [positions]
+      summary: Get all positions (open + closed)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Position" }
+
+  /executions:
+    get:
+      tags: [executions]
+      summary: Get execution history
+      parameters:
+        - name: chainId
+          in: query
+          schema: { type: integer }
+        - name: action
+          in: query
+          schema:
+            type: string
+            enum: [add_liquidity, remove_liquidity, swap, collect_fees]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, confirmed, failed]
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Execution" }
+
+  /stats:
+    get:
+      tags: [meta]
+      summary: Aggregate portfolio statistics
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totalExecutions: { type: integer }
+                  totalPositions:  { type: integer }
+                  openPositions:   { type: integer }
+                  totalPnlUsd:     { type: number }
+                  totalFeesUsd:    { type: number }
+
+  /chains:
+    get:
+      tags: [meta]
+      summary: Supported chain configurations
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    chainId:   { type: integer }
+                    name:      { type: string }
+                    blockTime: { type: integer, description: "Seconds per block" }
+                    contracts:
+                      type: object
+                      properties:
+                        poolManager:     { type: string }
+                        positionManager: { type: string }
+                        stateView:       { type: string }
+                        quoter:          { type: string }
+                        universalRouter: { type: string }
+
+  /slippage/check:
+    post:
+      tags: [slippage]
+      summary: Simulate a swap and check price impact
+      description: |
+        Calls the on-chain `Quoter.quoteExactInputSingle` and returns the expected
+        output amount and price impact. Use `minAmountOut` as the `amountOutMinimum`
+        parameter in your `UniversalRouter` call to enforce the slippage limit on-chain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chainId, poolKey, amountIn]
+              properties:
+                chainId:
+                  type: integer
+                  example: 11155111
+                poolKey:
+                  $ref: "#/components/schemas/PoolKey"
+                zeroForOne:
+                  type: boolean
+                  description: true = selling currency0 for currency1
+                  default: true
+                amountIn:
+                  type: string
+                  description: Amount in smallest token unit (as string to handle uint128)
+                  example: "1000000000000000000"
+                maxSlippageBps:
+                  type: integer
+                  description: Max acceptable slippage in basis points (50 = 0.5%)
+                  default: 50
+                inputTokenPriceUsd:
+                  type: number
+                  example: 2400
+                inputTokenDecimals:
+                  type: integer
+                  example: 18
+      responses:
+        "200":
+          description: Slippage check result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approved:          { type: boolean }
+                  quotedOut:         { type: string, description: "Expected output in smallest unit" }
+                  minAmountOut:      { type: string, description: "Pass this to UniversalRouter" }
+                  priceImpact:       { type: number, description: "Price impact %" }
+                  sqrtPriceLimitX96: { type: string }
+                  gasEstimate:       { type: string }
+                  reason:            { type: string, description: "Set if approved=false" }
+        "400":
+          description: Missing required fields
+        "500":
+          description: Quoter call failed (pool not initialized or RPC error)
+
+  /health:
+    get:
+      tags: [meta]
+      summary: Agent health check
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:       { type: string, example: ok }
+                  timestamp:    { type: integer }
+                  poolsScanned: { type: integer }
+
+components:
+  schemas:
+    PoolKey:
+      type: object
+      required: [currency0, currency1, fee, tickSpacing, hooks]
+      properties:
+        currency0:   { type: string, description: "Token0 address (0x0 = ETH)" }
+        currency1:   { type: string, description: "Token1 address" }
+        fee:         { type: integer, description: "Fee tier (100/500/3000/10000)" }
+        tickSpacing: { type: integer }
+        hooks:       { type: string, description: "Hooks contract address (0x0 = none)" }
+
+    RankedOpportunity:
+      type: object
+      properties:
+        rank:          { type: integer }
+        chainId:       { type: integer }
+        chainName:     { type: string }
+        network:       { type: string, enum: [mainnet, testnet] }
+        poolId:        { type: string }
+        pair:          { type: string, example: "WETH/USDC" }
+        feeTier:       { type: integer }
+        feeTierLabel:  { type: string, example: "0.30%" }
+        liveAPY:       { type: number, description: "On-chain calculated APY %" }
+        referenceAPY:  { type: number, description: "Mainnet DefiLlama APY %" }
+        displayAPY:    { type: number, description: "Best available APY for display" }
+        apySource:     { type: string, enum: [live, reference] }
+        risk:          { type: string, enum: [low, medium, high, extreme] }
+        tvlUsd:        { type: number }
+        volume24hUsd:  { type: number }
+        token0Price:   { type: number }
+        token1Price:   { type: number }
+        lastUpdated:   { type: integer, description: "Unix ms timestamp" }
+
+    Position:
+      type: object
+      properties:
+        id:               { type: integer }
+        chainId:          { type: integer }
+        chainName:        { type: string }
+        poolId:           { type: string }
+        token0Symbol:     { type: string }
+        token1Symbol:     { type: string }
+        feeTier:          { type: integer }
+        tickLower:        { type: integer }
+        tickUpper:        { type: integer }
+        liquidity:        { type: string }
+        entryValueUsd:    { type: number }
+        entryTimestamp:   { type: integer }
+        fees0Usd:         { type: number }
+        fees1Usd:         { type: number }
+        currentValueUsd:  { type: number }
+        unrealizedPnlUsd: { type: number }
+        realizedAPY:      { type: number }
+        status:           { type: string, enum: [open, closed] }
+
+    Execution:
+      type: object
+      properties:
+        id:           { type: integer }
+        timestamp:    { type: integer }
+        chainId:      { type: integer }
+        chainName:    { type: string }
+        poolId:       { type: string }
+        token0Symbol: { type: string }
+        token1Symbol: { type: string }
+        feeTier:      { type: integer }
+        action:       { type: string, enum: [add_liquidity, remove_liquidity, swap, collect_fees] }
+        amountIn:     { type: string }
+        amountOut:    { type: string }
+        txHash:       { type: string }
+        blockNumber:  { type: integer }
+        gasCostUsd:   { type: number }
+        apyAtEntry:   { type: number }
+        pnlUsd:       { type: number }
+        slippageBps:  { type: integer }
+        status:       { type: string, enum: [pending, confirmed, failed] }
