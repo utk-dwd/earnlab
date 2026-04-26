@@ -3,13 +3,23 @@ import cors from "cors";
 import path from "path";
 import yaml from "js-yaml";
 import fs from "fs";
-import type { YieldHunterAgent } from "../YieldHunterAgent";
+import type { ReporterAgent } from "../ReporterAgent";
+import type { PortfolioManager } from "../PortfolioManager";
 import { SlippageGuard } from "../calculator/SlippageGuard";
 
-export function createApiServer(agent: YieldHunterAgent): express.Application {
+export function createApiServer(agent: ReporterAgent, portfolio: PortfolioManager): express.Application {
   const app = express();
   app.use(cors());
   app.use(express.json());
+
+  // ── Root redirect ───────────────────────────────────────────────────────────
+  app.get("/", (_req, res) => {
+    res.json({
+      name: "EarnYld Yield Hunter API",
+      endpoints: ["/yields", "/positions", "/executions", "/stats", "/chains", "/health", "/openapi.json"],
+      docs: "http://localhost:3000/docs",
+    });
+  });
 
   // ── Serve OpenAPI spec as JSON ──────────────────────────────────────────────
   app.get("/openapi.json", (_req, res) => {
@@ -141,6 +151,19 @@ export function createApiServer(agent: YieldHunterAgent): express.Application {
     }
   });
 
+  // ── GET /portfolio ───────────────────────────────────────────────────────────
+  app.get("/portfolio", (_req: Request, res: Response) => {
+    res.json(portfolio.getSummary());
+  });
+
+  app.get("/portfolio/positions", (_req: Request, res: Response) => {
+    res.json({ data: portfolio.getPositions() });
+  });
+
+  app.get("/portfolio/trades", (_req: Request, res: Response) => {
+    res.json({ count: portfolio.getTrades().length, data: portfolio.getTrades() });
+  });
+
   // ── Health ───────────────────────────────────────────────────────────────────
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", timestamp: Date.now(), poolsScanned: agent.getLatest().length });
@@ -155,8 +178,8 @@ export function createApiServer(agent: YieldHunterAgent): express.Application {
   return app;
 }
 
-export function startApiServer(agent: YieldHunterAgent, port = 3001): void {
-  const app = createApiServer(agent);
+export function startApiServer(agent: ReporterAgent, portfolio: PortfolioManager, port = 3001): void {
+  const app = createApiServer(agent, portfolio);
   app.listen(port, () => {
     console.log(`[API] Listening on http://localhost:${port}`);
     console.log(`[API] OpenAPI spec at http://localhost:${port}/openapi.json`);

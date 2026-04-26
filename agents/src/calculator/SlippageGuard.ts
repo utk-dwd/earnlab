@@ -77,7 +77,7 @@ export class SlippageGuard {
   }
 
   async check(params: SlippageCheckParams): Promise<SlippageCheckResult> {
-    const cfg = SUPPORTED_CHAINS.find((c) => c.chainId === params.chainId);
+    const cfg = ALL_CHAINS.find((c) => c.chainId === params.chainId);
     if (!cfg) {
       return {
         approved: false,

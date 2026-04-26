@@ -1,22 +1,26 @@
 import * as dotenv from "dotenv";
 dotenv.config({ path: "../../.env" });
 
-import { YieldHunterAgent } from "./YieldHunterAgent";
+import { ReporterAgent }    from "./ReporterAgent";
+import { PortfolioManager } from "./PortfolioManager";
 import { startApiServer }   from "./api/server";
 
 const API_PORT = Number(process.env.AGENT_API_PORT ?? 3001);
 
 async function main() {
-  const agent = new YieldHunterAgent();
+  const reporter  = new ReporterAgent();
+  const portfolio = new PortfolioManager(reporter);
 
-  // Start REST API first so the dashboard has an endpoint immediately
-  startApiServer(agent, API_PORT);
+  startApiServer(reporter, portfolio, API_PORT);
 
-  // Start the scan loop (non-blocking — runs interval internally)
-  await agent.start();
+  // Reporter scans first so portfolio has opportunity data to work with
+  await reporter.start();
+
+  // Portfolio ticks every 5 min; first tick may wait if RAR not yet computed
+  await portfolio.start();
 }
 
 main().catch((err) => {
-  console.error("[YieldHunter] Fatal:", err);
+  console.error("[Portfolio] Fatal:", err);
   process.exit(1);
 });

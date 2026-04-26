@@ -5,14 +5,12 @@ import {
   encodeAbiParameters,
   parseAbiParameters,
   parseAbi,
-  formatUnits,
+  parseAbiItem,
   type PublicClient,
 } from "viem";
 import axios from "axios";
 import {
   ALL_CHAINS,
-  MAINNET_CHAINS,
-  TESTNET_CHAINS,
   KNOWN_TOKENS,
   FEE_TIERS,
   TICK_SPACINGS,
@@ -21,24 +19,41 @@ import {
   type FeeTier,
 } from "../config/chains";
 
-// ─── ABIs (minimal) ──────────────────────────────────────────────────────────
+// ─── ABIs ────────────────────────────────────────────────────────────────────
 const STATE_VIEW_ABI = parseAbi([
   "function getSlot0(bytes32 poolId) external view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
   "function getLiquidity(bytes32 poolId) external view returns (uint128 liquidity)",
 ]);
 
-const POOL_MANAGER_ABI = parseAbi([
-  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
-  "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)",
-]);
+const INITIALIZE_EVENT = parseAbiItem(
+  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
+);
+const SWAP_EVENT = parseAbiItem(
+  "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"
+);
+
+// ─── DefiLlama chain name → chainId ──────────────────────────────────────────
+const DEFILLAMA_CHAIN: Record<string, number> = {
+  Ethereum:      1,
+  Unichain:      130,
+  Optimism:      10,
+  Base:          8453,
+  "Arbitrum":    42161,
+  Polygon:       137,
+  Blast:         81457,
+  Avalanche:     43114,
+  "BSC":         56,
+  Celo:          42220,
+  Zora:          7777777,
+};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export interface PoolKey {
-  currency0: `0x${string}`;
-  currency1: `0x${string}`;
-  fee: number;
+  currency0:   `0x${string}`;
+  currency1:   `0x${string}`;
+  fee:         number;
   tickSpacing: number;
-  hooks: `0x${string}`;
+  hooks:       `0x${string}`;
 }
 
 export interface PoolState {
@@ -50,54 +65,164 @@ export interface PoolState {
   sqrtPriceX96: bigint;
   tick:         number;
   liquidity:    bigint;
-  /** USD value of total liquidity in pool */
   tvlUsd:       number;
-  /** Raw volume in USD over last 24h (from on-chain Swap events) */
   volume24hUsd: number;
-  /** On-chain APY computed from fee income / TVL */
   liveAPY:      number;
-  /** Mainnet reference APY for same pair from DefiLlama (0 if not found) */
   referenceAPY: number;
   token0Symbol: string;
   token1Symbol: string;
-  token0Price:  number; // USD
-  token1Price:  number; // USD
+  token0Price:  number;
+  token1Price:  number;
+  /** "onchain" = StateView read succeeded; "defillama" = fallback data */
+  dataSource:   "onchain" | "defillama";
   lastUpdated:  number;
 }
 
-// ─── Price cache (CoinGecko-compatible via DefiLlama) ────────────────────────
+// ─── DefiLlama fetch (cached 5 min) ──────────────────────────────────────────
+let llamaCache:   any[]  = [];
+let llamaCacheTs: number = 0;
+
+async function fetchLlama(): Promise<any[]> {
+  if (llamaCache.length > 0 && Date.now() - llamaCacheTs < 300_000) return llamaCache;
+  try {
+    const r = await axios.get("https://yields.llama.fi/pools", { timeout: 10_000 });
+    llamaCache   = r.data?.data ?? [];
+    llamaCacheTs = Date.now();
+  } catch { /* keep stale cache on failure */ }
+  return llamaCache;
+}
+
+// Minimum TVL to include a pool — filters out micro-cap memecoin noise
+const MIN_TVL_USD = 500_000; // $500K
+
+// DefiLlama chain name for each mainnet chainId
+const CHAIN_TO_LLAMA: Record<number, string> = {
+  1:       "Ethereum",
+  130:     "Unichain",
+  10:      "Optimism",
+  8453:    "Base",
+  42161:   "Arbitrum",
+  137:     "Polygon",
+  81457:   "Blast",
+  43114:   "Avalanche",
+  56:      "BSC",
+  42220:   "Celo",
+  7777777: "Zora",
+  480:     "Worldchain",
+  57073:   "Ink",
+  1868:    "Soneium",
+};
+
+// Testnet → corresponding mainnet chainId (for reference APY lookup)
+const TESTNET_TO_MAINNET: Record<number, number> = {
+  11155111: 1,       // Sepolia       → Ethereum
+  84532:    8453,    // Base Sepolia   → Base
+  421614:   42161,   // Arb Sepolia    → Arbitrum
+  1301:     130,     // Unichain Sep   → Unichain
+};
+
+/** Build PoolState entries from DefiLlama (no RPC needed).
+ *
+ *  Mainnet chains  → real DefiLlama pools, TVL-filtered, known-token-filtered.
+ *  Testnet chains  → reference APY only: look up same pair on corresponding
+ *                    mainnet chain and mark as apySource="reference".
+ */
+async function defiLlamaPoolsForChain(cfg: ChainConfig): Promise<PoolState[]> {
+  const all = await fetchLlama();
+
+  // Which chainId to query in DefiLlama?
+  const lookupChainId = cfg.network === "testnet"
+    ? TESTNET_TO_MAINNET[cfg.chainId]   // testnet → mainnet equivalent
+    : cfg.chainId;
+
+  if (!lookupChainId) return []; // no mainnet equivalent known
+
+  const llamaChainName = CHAIN_TO_LLAMA[lookupChainId];
+  if (!llamaChainName) return [];
+
+  // Known tokens for the actual chain (testnet tokens for key building)
+  const tokens     = KNOWN_TOKENS[cfg.chainId] ?? {};
+  const knownSyms  = new Set(Object.values(tokens).map((t) => t.symbol.toUpperCase()));
+
+  const matches = all.filter((p: any) => {
+    if (p.project !== "uniswap-v4" && p.project !== "uniswap-v3") return false;
+    if (p.chain !== llamaChainName) return false;
+    if ((p.tvlUsd ?? 0) < MIN_TVL_USD) return false;       // ← TVL floor
+
+    // Both tokens must be in our known-token list for this chain
+    const [sym0, sym1] = (p.symbol ?? "").toUpperCase().split("-");
+    if (!sym0 || !sym1) return false;
+    if (!knownSyms.has(sym0) && sym0 !== "ETH") return false;
+    if (!knownSyms.has(sym1) && sym1 !== "ETH") return false;
+
+    return true;
+  });
+
+  return matches.map((p: any): PoolState => {
+    const [sym0raw, sym1raw] = (p.symbol ?? "?-?").split("-");
+    const sym0 = sym0raw ?? "?";
+    const sym1 = sym1raw ?? "?";
+    const fee  = p.feeTier ?? 3000;
+
+    const t0 = Object.values(tokens).find((t) => t.symbol.toUpperCase() === sym0.toUpperCase());
+    const t1 = Object.values(tokens).find((t) => t.symbol.toUpperCase() === sym1.toUpperCase());
+
+    const poolKey: PoolKey = {
+      currency0:   (t0?.address ?? ETH_ADDRESS) as `0x${string}`,
+      currency1:   (t1?.address ?? ETH_ADDRESS) as `0x${string}`,
+      fee,
+      tickSpacing: TICK_SPACINGS[fee as FeeTier] ?? 60,
+      hooks:       ETH_ADDRESS,
+    };
+
+    // Use the real pool ID for mainnet; for testnet use computed key
+    const poolId = cfg.network === "mainnet"
+      ? ((p.pool ?? computePoolId(poolKey)) as `0x${string}`)
+      : (`testnet-ref-${cfg.chainId}-${computePoolId(poolKey)}` as `0x${string}`);
+
+    return {
+      poolId,
+      poolKey,
+      chainId:      cfg.chainId,
+      chainName:    cfg.name,
+      network:      cfg.network,
+      sqrtPriceX96: 0n,
+      tick:         0,
+      liquidity:    0n,
+      tvlUsd:       cfg.network === "mainnet" ? (p.tvlUsd ?? 0) : 0,
+      volume24hUsd: cfg.network === "mainnet" ? (p.volumeUsd1d ?? 0) : 0,
+      liveAPY:      0,
+      referenceAPY: p.apy ?? 0,
+      token0Symbol: sym0,
+      token1Symbol: sym1,
+      token0Price:  0,
+      token1Price:  0,
+      dataSource:   "defillama",
+      lastUpdated:  Date.now(),
+    };
+  });
+}
+
+// ─── Price cache ─────────────────────────────────────────────────────────────
 const priceCache = new Map<string, { price: number; ts: number }>();
-const PRICE_TTL_MS = 60_000;
 
-async function fetchTokenPrice(
-  chainId: number,
-  tokenAddress: `0x${string}`
-): Promise<number> {
-  // ETH/WETH → use ethereum native price
-  const isEth =
-    tokenAddress === ETH_ADDRESS ||
-    tokenAddress.toLowerCase() === "0x4200000000000000000000000000000000000006" || // OP-stack WETH
-    tokenAddress.toLowerCase() === "0xfff9976782d46cc05630d1f6ebab18b2324d6b14";  // Sepolia WETH
+async function fetchTokenPrice(chainId: number, tokenAddress: `0x${string}`): Promise<number> {
+  const isEth = tokenAddress === ETH_ADDRESS ||
+    tokenAddress.toLowerCase() === "0x4200000000000000000000000000000000000006" ||
+    tokenAddress.toLowerCase() === "0xfff9976782d46cc05630d1f6ebab18b2324d6b14";
 
-  const chainSlug: Record<number, string> = {
-    11155111: "ethereum",
-    84532:    "base",
-    421614:   "arbitrum",
-    1301:     "ethereum",
+  const slugMap: Record<number, string> = {
+    1: "ethereum", 8453: "base", 42161: "arbitrum",
+    10: "optimism", 137: "polygon", 130: "ethereum",
   };
-  const slug = chainSlug[chainId] ?? "ethereum";
-
+  const slug     = slugMap[chainId] ?? "ethereum";
   const cacheKey = isEth ? "eth" : `${slug}:${tokenAddress.toLowerCase()}`;
-  const cached = priceCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < PRICE_TTL_MS) return cached.price;
+  const cached   = priceCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 60_000) return cached.price;
 
   try {
-    // DefiLlama prices API — free, no key required
     const coinsKey = isEth ? "coingecko:ethereum" : `${slug}:${tokenAddress}`;
-    const resp = await axios.get(
-      `https://coins.llama.fi/prices/current/${coinsKey}`,
-      { timeout: 5000 }
-    );
+    const resp = await axios.get(`https://coins.llama.fi/prices/current/${coinsKey}`, { timeout: 5_000 });
     const price: number = resp.data?.coins?.[coinsKey]?.price ?? 0;
     priceCache.set(cacheKey, { price, ts: Date.now() });
     return price;
@@ -106,41 +231,7 @@ async function fetchTokenPrice(
   }
 }
 
-// ─── DefiLlama reference APY for mainnet same-pair ──────────────────────────
-let defiLlamaCache: any[] | null = null;
-let defiLlamaCacheTs = 0;
-
-async function fetchDefiLlamaReferenceAPY(
-  symbol0: string,
-  symbol1: string,
-  feeTier: number
-): Promise<number> {
-  // Refresh at most once per 5 min
-  if (!defiLlamaCache || Date.now() - defiLlamaCacheTs > 300_000) {
-    try {
-      const resp = await axios.get("https://yields.llama.fi/pools", { timeout: 8000 });
-      defiLlamaCache = resp.data?.data ?? [];
-      defiLlamaCacheTs = Date.now();
-    } catch {
-      return 0;
-    }
-  }
-
-  const feeStr = (feeTier / 10_000).toFixed(2); // e.g. "0.30" for 3000
-  const pair = [symbol0, symbol1].sort().join("-").toUpperCase();
-  const match = defiLlamaCache!.find((p: any) => {
-    const poolPair = (p.symbol ?? "").toUpperCase().replace("/", "-");
-    return (
-      p.project === "uniswap-v4" &&
-      p.chain === "Ethereum" &&
-      poolPair === pair &&
-      Math.abs((p.feeTier ?? 0) - feeTier) < 100
-    );
-  });
-  return match?.apy ?? 0;
-}
-
-// ─── Pool ID computation ─────────────────────────────────────────────────────
+// ─── Pool ID ─────────────────────────────────────────────────────────────────
 export function computePoolId(key: PoolKey): `0x${string}` {
   return keccak256(
     encodeAbiParameters(
@@ -150,302 +241,191 @@ export function computePoolId(key: PoolKey): `0x${string}` {
   );
 }
 
-// ─── TVL from on-chain liquidity + price ────────────────────────────────────
-function sqrtPriceX96ToPrice(sqrtPriceX96: bigint, decimals0: number, decimals1: number): number {
-  // price1in0 = (sqrtPriceX96 / 2^96)^2 * 10^(decimals0-decimals1)
-  const Q96 = 2n ** 96n;
-  const ratio = Number(sqrtPriceX96) / Number(Q96);
-  return ratio * ratio * Math.pow(10, decimals0 - decimals1);
-}
-
+// ─── TVL from liquidity + price ───────────────────────────────────────────────
 function liquidityToTVL(
-  liquidity: bigint,
-  sqrtPriceX96: bigint,
-  token0Price: number,
-  token1Price: number,
-  decimals0: number,
-  decimals1: number
+  liquidity: bigint, sqrtPriceX96: bigint,
+  p0: number, p1: number, d0: number, d1: number
 ): number {
-  if (liquidity === 0n || sqrtPriceX96 === 0n) return 0;
-  const Q96 = 2n ** 96n;
-  // Approximate: treat full-range position
-  // amount0 ≈ L * 2^96 / sqrtPriceX96
-  // amount1 ≈ L * sqrtPriceX96 / 2^96
-  const amt0 = Number((liquidity * Q96) / sqrtPriceX96) / Math.pow(10, decimals0);
-  const amt1 = Number((liquidity * sqrtPriceX96) / Q96) / Math.pow(10, decimals1);
-  return amt0 * token0Price + amt1 * token1Price;
+  if (!liquidity || !sqrtPriceX96) return 0;
+  const Q96  = 2n ** 96n;
+  const amt0 = Number((liquidity * Q96) / sqrtPriceX96) / Math.pow(10, d0);
+  const amt1 = Number((liquidity * sqrtPriceX96) / Q96) / Math.pow(10, d1);
+  return amt0 * p0 + amt1 * p1;
 }
 
-// ─── Volume from Swap events (last 24 h) ────────────────────────────────────
+// ─── 24h volume from Swap events ─────────────────────────────────────────────
 async function getVolume24h(
-  client: PublicClient,
-  poolManagerAddress: `0x${string}`,
-  poolId: `0x${string}`,
-  blockTime: number,
-  token0Price: number,
-  decimals0: number
+  client: PublicClient, poolManager: `0x${string}`,
+  poolId: `0x${string}`, blockTime: number, p0: number, d0: number
 ): Promise<number> {
   const blocksPerDay = Math.ceil(86400 / blockTime);
   try {
     const latest = await client.getBlockNumber();
-    const fromBlock = latest - BigInt(blocksPerDay);
-
-    const logs = await client.getLogs({
-      address: poolManagerAddress,
-      event: POOL_MANAGER_ABI[1] as any, // Swap event
-      args: { id: poolId } as any,
-      fromBlock: fromBlock > 0n ? fromBlock : 0n,
-      toBlock: latest,
+    const logs   = await client.getLogs({
+      address: poolManager, event: SWAP_EVENT,
+      args: { id: poolId },
+      fromBlock: latest - BigInt(blocksPerDay),
+      toBlock:   latest,
     });
-
-    let totalAmount0 = 0n;
+    let total = 0n;
     for (const log of logs) {
-      const args = log.args as any;
-      if (args?.amount0) {
-        totalAmount0 += args.amount0 < 0n ? -args.amount0 : args.amount0;
-      }
+      const a = log.args.amount0;
+      if (a != null) total += a < 0n ? -a : a;
     }
-    const volumeToken0 = Number(totalAmount0) / Math.pow(10, decimals0);
-    return volumeToken0 * token0Price;
-  } catch {
-    return 0;
-  }
+    return (Number(total) / Math.pow(10, d0)) * p0;
+  } catch { return 0; }
 }
 
-// ─── Discover pools via Initialize events (recent blocks only) ───────────────
-async function discoverPools(
-  client: PublicClient,
-  poolManagerAddress: `0x${string}`,
-  chainId: number,
-  blockTime: number
-): Promise<PoolKey[]> {
-  const blocksToScan = Math.ceil((7 * 86400) / blockTime); // last 7 days
+// ─── On-chain scan for a single chain ────────────────────────────────────────
+async function onchainScan(cfg: ChainConfig): Promise<PoolState[]> {
+  const client = createPublicClient({
+    chain: cfg.chain, transport: http(cfg.rpcUrl, { timeout: 8_000 }),
+  }) as any as PublicClient;
+
+  // Discover pools from Initialize events (last 7 days)
+  const blocksToScan = Math.ceil((7 * 86400) / cfg.blockTime);
+  let discovered: PoolKey[] = [];
   try {
     const latest = await client.getBlockNumber();
-    const fromBlock = latest - BigInt(blocksToScan);
-
-    const logs = await client.getLogs({
-      address: poolManagerAddress,
-      event: POOL_MANAGER_ABI[0] as any, // Initialize event
-      fromBlock: fromBlock > 0n ? fromBlock : 0n,
-      toBlock: latest,
+    const logs   = await client.getLogs({
+      address:   cfg.contracts.poolManager,
+      event:     INITIALIZE_EVENT,
+      fromBlock: latest - BigInt(blocksToScan),
+      toBlock:   latest,
     });
+    discovered = logs.map((log) => ({
+      currency0:   log.args.currency0 as `0x${string}`,
+      currency1:   log.args.currency1 as `0x${string}`,
+      fee:         Number(log.args.fee),
+      tickSpacing: Number(log.args.tickSpacing),
+      hooks:       log.args.hooks as `0x${string}`,
+    }));
+  } catch { /* RPC failed — continue with seed only */ }
 
-    return logs.map((log) => {
-      const args = log.args as any;
-      return {
-        currency0:   args.currency0 as `0x${string}`,
-        currency1:   args.currency1 as `0x${string}`,
-        fee:         Number(args.fee),
-        tickSpacing: Number(args.tickSpacing),
-        hooks:       args.hooks as `0x${string}`,
-      };
-    });
-  } catch {
-    return [];
-  }
-}
-
-// ─── Build well-known seed pool keys for each chain ─────────────────────────
-function seedPoolKeys(chainId: number): PoolKey[] {
-  const tokens = KNOWN_TOKENS[chainId];
-  if (!tokens) return [];
-
-  const keys: PoolKey[] = [];
+  // Seed well-known pairs
+  const tokens    = KNOWN_TOKENS[cfg.chainId] ?? {};
   const tokenList = Object.values(tokens);
-
+  const seedKeys: PoolKey[] = [];
   for (let i = 0; i < tokenList.length; i++) {
     for (let j = i + 1; j < tokenList.length; j++) {
-      // Sort by address (v4 requires currency0 < currency1)
-      const [t0, t1] = [tokenList[i], tokenList[j]].sort((a, b) =>
-        a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1
+      const [t0, t1] = [tokenList[i], tokenList[j]].sort(
+        (a, b) => (a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1)
       );
       for (const fee of FEE_TIERS) {
-        keys.push({
-          currency0:   t0.address,
-          currency1:   t1.address,
-          fee,
-          tickSpacing: TICK_SPACINGS[fee as FeeTier],
-          hooks:       ETH_ADDRESS,
-        });
+        seedKeys.push({ currency0: t0.address, currency1: t1.address, fee,
+                        tickSpacing: TICK_SPACINGS[fee as FeeTier], hooks: ETH_ADDRESS });
       }
     }
   }
-  return keys;
-}
 
-// ─── Scan a single chain ─────────────────────────────────────────────────────
-async function scanChain(cfg: ChainConfig): Promise<PoolState[]> {
-  const client = createPublicClient({
-    chain: cfg.chain,
-    transport: http(cfg.rpcUrl),
-  });
-
-  // Merge seed pools + discovered pools (deduplicate by poolId)
-  const seedKeys = seedPoolKeys(cfg.chainId);
-  const discovered = await discoverPools(
-    client as any,
-    cfg.contracts.poolManager,
-    cfg.chainId,
-    cfg.blockTime
-  );
-
+  // Deduplicate
+  const seen    = new Set(seedKeys.map(computePoolId));
   const allKeys = [...seedKeys];
-  const seenIds = new Set(seedKeys.map(computePoolId));
-  for (const key of discovered) {
-    const id = computePoolId(key);
-    if (!seenIds.has(id)) {
-      seenIds.add(id);
-      allKeys.push(key);
-    }
+  for (const k of discovered) {
+    const id = computePoolId(k);
+    if (!seen.has(id)) { seen.add(id); allKeys.push(k); }
+  }
+
+  function tokenMeta(addr: `0x${string}`) {
+    return Object.values(tokens).find(
+      (t) => t.address.toLowerCase() === addr.toLowerCase()
+    ) ?? { symbol: addr.slice(0, 6), decimals: 18 };
   }
 
   const results: PoolState[] = [];
-  const tokens = KNOWN_TOKENS[cfg.chainId] ?? {};
 
-  // Resolve token metadata helper
-  function tokenMeta(addr: `0x${string}`): { symbol: string; decimals: number } {
-    const known = Object.values(tokens).find(
-      (t) => t.address.toLowerCase() === addr.toLowerCase()
-    );
-    return known ?? { symbol: addr.slice(0, 6), decimals: 18 };
-  }
-
-  // Process pools in parallel (batches of 5 to avoid rate limiting)
+  // Process in batches of 5
   for (let i = 0; i < allKeys.length; i += 5) {
     const batch = allKeys.slice(i, i + 5);
     const settled = await Promise.allSettled(
       batch.map(async (key): Promise<PoolState | null> => {
         const poolId = computePoolId(key);
-
-        let slot0: { sqrtPriceX96: bigint; tick: number; protocolFee: number; lpFee: number };
-        let liquidity: bigint;
+        let slot0: any, liquidity: bigint;
         try {
           [slot0, liquidity] = await Promise.all([
-            client.readContract({
-              address: cfg.contracts.stateView,
-              abi: STATE_VIEW_ABI,
-              functionName: "getSlot0",
-              args: [poolId],
-            }) as any,
-            client.readContract({
-              address: cfg.contracts.stateView,
-              abi: STATE_VIEW_ABI,
-              functionName: "getLiquidity",
-              args: [poolId],
-            }) as any,
+            client.readContract({ address: cfg.contracts.stateView, abi: STATE_VIEW_ABI,
+              functionName: "getSlot0", args: [poolId] }),
+            client.readContract({ address: cfg.contracts.stateView, abi: STATE_VIEW_ABI,
+              functionName: "getLiquidity", args: [poolId] }),
           ]);
-        } catch {
-          return null; // Pool not initialized
-        }
+        } catch { return null; }
 
-        if ((slot0 as any).sqrtPriceX96 === 0n) return null;
+        if (!slot0?.sqrtPriceX96 || slot0.sqrtPriceX96 === 0n) return null;
 
-        const meta0 = tokenMeta(key.currency0);
-        const meta1 = tokenMeta(key.currency1);
-
-        const [price0, price1] = await Promise.all([
+        const m0 = tokenMeta(key.currency0);
+        const m1 = tokenMeta(key.currency1);
+        const [p0, p1] = await Promise.all([
           fetchTokenPrice(cfg.chainId, key.currency0),
           fetchTokenPrice(cfg.chainId, key.currency1),
         ]);
 
-        const tvlUsd = liquidityToTVL(
-          (liquidity as any) as bigint,
-          (slot0 as any).sqrtPriceX96 as bigint,
-          price0,
-          price1,
-          meta0.decimals,
-          meta1.decimals
-        );
-
-        const volume24hUsd = await getVolume24h(
-          client as any,
-          cfg.contracts.poolManager,
-          poolId,
-          cfg.blockTime,
-          price0,
-          meta0.decimals
-        );
-
-        // Fee APY = (dailyFeeIncome / tvl) * 365 * 100
-        const dailyFeeIncome = volume24hUsd * (key.fee / 1_000_000);
-        const liveAPY = tvlUsd > 1000 ? (dailyFeeIncome / tvlUsd) * 365 * 100 : 0;
-
-        const referenceAPY = await fetchDefiLlamaReferenceAPY(
-          meta0.symbol,
-          meta1.symbol,
-          key.fee
-        );
+        const tvlUsd      = liquidityToTVL(liquidity as bigint, slot0.sqrtPriceX96, p0, p1, m0.decimals, m1.decimals);
+        const volume24hUsd = await getVolume24h(client, cfg.contracts.poolManager, poolId, cfg.blockTime, p0, m0.decimals);
+        const dailyFees   = volume24hUsd * (key.fee / 1_000_000);
+        const liveAPY     = tvlUsd > 1000 ? (dailyFees / tvlUsd) * 365 * 100 : 0;
 
         return {
-          poolId,
-          poolKey:      key,
-          chainId:      cfg.chainId,
-          chainName:    cfg.name,
-          network:      cfg.network,
-          sqrtPriceX96: (slot0 as any).sqrtPriceX96 as bigint,
-          tick:         (slot0 as any).tick as number,
-          liquidity:    (liquidity as any) as bigint,
-          tvlUsd,
-          volume24hUsd,
-          liveAPY,
-          referenceAPY,
-          token0Symbol: meta0.symbol,
-          token1Symbol: meta1.symbol,
-          token0Price:  price0,
-          token1Price:  price1,
-          lastUpdated:  Date.now(),
+          poolId, poolKey: key, chainId: cfg.chainId, chainName: cfg.name, network: cfg.network,
+          sqrtPriceX96: slot0.sqrtPriceX96 as bigint, tick: slot0.tick as number,
+          liquidity: liquidity as bigint, tvlUsd, volume24hUsd, liveAPY, referenceAPY: 0,
+          token0Symbol: m0.symbol, token1Symbol: m1.symbol,
+          token0Price: p0, token1Price: p1,
+          dataSource: "onchain", lastUpdated: Date.now(),
         };
       })
     );
-
-    for (const r of settled) {
+    for (const r of settled)
       if (r.status === "fulfilled" && r.value) results.push(r.value);
-    }
   }
 
   return results;
 }
 
-// ─── Public scanner API ──────────────────────────────────────────────────────
+// ─── Public scanner ───────────────────────────────────────────────────────────
 export class UniswapV4Scanner {
-  /**
-   * Scan all chains (mainnet + testnet by default).
-   * Pass `network` to restrict to one environment.
-   */
   async scanAllChains(network?: "mainnet" | "testnet"): Promise<PoolState[]> {
-    const chains = network
-      ? ALL_CHAINS.filter((c) => c.network === network)
-      : ALL_CHAINS;
+    const chains = network ? ALL_CHAINS.filter((c) => c.network === network) : ALL_CHAINS;
 
-    const perChain = await Promise.allSettled(chains.map((cfg) => scanChain(cfg)));
+    // Run DefiLlama (fast, always works) + on-chain (slower, may fail) in parallel
+    const [llamaResults, onchainResults] = await Promise.all([
+      Promise.allSettled(chains.map(defiLlamaPoolsForChain)),
+      Promise.allSettled(chains.map(onchainScan)),
+    ]);
 
-    const all: PoolState[] = [];
-    for (const r of perChain) {
-      if (r.status === "fulfilled") all.push(...r.value);
-    }
+    // Flatten DefiLlama pools
+    const llamaMap = new Map<string, PoolState>();
+    for (const r of llamaResults)
+      if (r.status === "fulfilled") for (const p of r.value) llamaMap.set(p.poolId, p);
+
+    // Overwrite with on-chain data where available (it's more accurate)
+    for (const r of onchainResults)
+      if (r.status === "fulfilled") for (const p of r.value) llamaMap.set(p.poolId, p);
+
+    const all = Array.from(llamaMap.values()).filter(
+      (p) => p.referenceAPY > 0 || p.liveAPY > 0 || p.tvlUsd > 0
+    );
 
     return all
-      .filter((p) => p.referenceAPY > 0 || p.tvlUsd > 0)
       .sort((a, b) => {
-        // Mainnet live APY is the most valuable signal; float it to top
-        const scoreA = a.liveAPY > 0 ? a.liveAPY : a.referenceAPY * 0.01;
-        const scoreB = b.liveAPY > 0 ? b.liveAPY : b.referenceAPY * 0.01;
-        return scoreB - scoreA;
+        const sa = a.liveAPY > 0 ? a.liveAPY : a.referenceAPY * 0.01;
+        const sb = b.liveAPY > 0 ? b.liveAPY : b.referenceAPY * 0.01;
+        return sb - sa;
       });
   }
 
-  async scanMainnet(): Promise<PoolState[]> {
-    return this.scanAllChains("mainnet");
-  }
-
-  async scanTestnets(): Promise<PoolState[]> {
-    return this.scanAllChains("testnet");
-  }
+  async scanMainnet():  Promise<PoolState[]> { return this.scanAllChains("mainnet"); }
+  async scanTestnets(): Promise<PoolState[]> { return this.scanAllChains("testnet"); }
 
   async scanChain(chainId: number): Promise<PoolState[]> {
     const cfg = ALL_CHAINS.find((c) => c.chainId === chainId);
     if (!cfg) throw new Error(`Chain ${chainId} not supported`);
-    return scanChain(cfg);
+    const [llama, onchain] = await Promise.all([
+      defiLlamaPoolsForChain(cfg),
+      onchainScan(cfg),
+    ]);
+    const map = new Map<string, PoolState>();
+    for (const p of llama)   map.set(p.poolId, p);
+    for (const p of onchain) map.set(p.poolId, p);
+    return Array.from(map.values());
   }
 }

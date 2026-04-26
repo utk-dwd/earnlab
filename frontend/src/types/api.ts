@@ -18,7 +18,18 @@ export interface RankedOpportunity {
   volume24hUsd:  number;
   token0Price:   number;
   token1Price:   number;
-  lastUpdated:   number;
+  rar24h:        number;
+  rar7d:         number;
+  vol24h:        number;
+  vol7d:         number;
+  rarQuality:           "excellent" | "good" | "fair" | "poor" | "n/a";
+  token0PriceChange24h: number;
+  token0PriceChange7d:  number;
+  token1PriceChange24h: number;
+  token1PriceChange7d:  number;
+  pairPriceChange24h:   number;
+  pairPriceChange7d:    number;
+  lastUpdated:          number;
 }
 
 export interface Position {
@@ -73,6 +84,61 @@ export interface AgentStats {
   totalFeesUsd:    number;
 }
 
-export interface YieldsResponse   { count: number; data: RankedOpportunity[] }
-export interface PositionsResponse { data: Position[] }
+export interface MockPosition {
+  id:              string;
+  poolId:          string;
+  chainId:         number;
+  chainName:       string;
+  pair:            string;
+  feeTierLabel:    string;
+  entryTimestamp:  number;
+  entryValueUsd:   number;
+  allocationPct:   number;
+  entryAPY:        number;
+  entryRAR7d:      number;
+  currentValueUsd: number;
+  earnedFeesUsd:   number;
+  pnlUsd:          number;
+  pnlPct:          number;
+  hoursHeld:       number;
+  status:          "open" | "closed";
+  closedTimestamp?: number;
+  closedValueUsd?:  number;
+  closeReason?:     string;
+}
+
+export interface PortfolioTrade {
+  id:           string;
+  timestamp:    number;
+  action:       "open" | "close";
+  poolId:       string;
+  pair:         string;
+  chainName:    string;
+  feeTierLabel: string;
+  valueUsd:     number;
+  apy:          number;
+  rar7d:        number;
+  feePaidUsd:   number;
+  reason:       string;
+}
+
+export interface PortfolioSummary {
+  totalCapitalUsd:        number;
+  cashUsd:                number;
+  investedUsd:            number;
+  totalValueUsd:          number;
+  unrealizedPnlUsd:       number;
+  unrealizedPnlPct:       number;
+  realizedPnlUsd:         number;
+  totalEarnedFeesUsd:     number;
+  totalFeesPaidUsd:       number;
+  openPositions:          number;
+  tradeCount:             number;
+  lastRebalanceTimestamp: number | null;
+}
+
+export interface YieldsResponse     { count: number; data: RankedOpportunity[] }
+export interface PositionsResponse  { data: Position[] }
 export interface ExecutionsResponse { count: number; data: Execution[] }
+export interface PortfolioPositionsResponse { data: MockPosition[] }
+export interface PortfolioTradesResponse    { count: number; data: PortfolioTrade[] }
