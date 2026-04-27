@@ -177,11 +177,11 @@ export class PortfolioManager {
 
   private toolListOpps(limit = 10, minRar7d?: number, network?: string): RankedOpportunity[] {
     let opps = this.reporter.getLatest()
-      .filter(o => o.rar7d > 0 && o.displayAPY > 0);
+      .filter(o => o.displayAPY > 0);
     if (minRar7d != null) opps = opps.filter(o => o.rar7d >= minRar7d);
     if (network && network !== "all") opps = opps.filter(o => o.network === network);
     return opps
-      .sort((a, b) => b.rar7d - a.rar7d)
+      .sort(rarOrApySort)
       .slice(0, Math.min(limit, 20));
   }
 
@@ -236,9 +236,7 @@ export class PortfolioManager {
   private deploy(): void {
     const candidates = this.rankedCandidates();
     if (candidates.length === 0) {
-      const total   = this.reporter.getLatest().length;
-      const withRar = this.reporter.getLatest().filter(o => o.rar7d > 0).length;
-      console.log(`[Portfolio] Waiting for RAR data — ${withRar}/${total} pools enriched`);
+      console.log("[Portfolio] No yield opportunities available yet — will retry");
       return;
     }
 
@@ -269,13 +267,23 @@ export class PortfolioManager {
 
       const best = candidates.find(c => !inPortfolio.has(c.poolId));
       if (!best) continue;
-      if (best.rar7d <= currentRAR * (1 + REBALANCE_THRESHOLD)) continue;
+
+      // Compare by RAR when available; fall back to APY-only comparison
+      const hasRAR = best.rar7d > 0 && currentRAR > 0;
+      if (hasRAR) {
+        if (best.rar7d <= currentRAR * (1 + REBALANCE_THRESHOLD)) continue;
+      } else {
+        if (best.displayAPY <= currentAPY * (1 + REBALANCE_THRESHOLD)) continue;
+      }
 
       const cost        = pos.currentValueUsd * (ENTRY_FEE_PCT + EXIT_FEE_PCT);
       const extraPerDay = pos.currentValueUsd * (best.displayAPY - currentAPY) / 100 / 365;
       if (extraPerDay <= 0 || cost / extraPerDay > MAX_BREAKEVEN_DAYS) continue;
 
-      const reason   = `Rebalanced: ${best.pair} RAR ${best.rar7d.toFixed(2)} vs ${pos.pair} ${currentRAR.toFixed(2)} (fee recovers in ${(cost / extraPerDay).toFixed(1)}d)`;
+      const rarLabel = hasRAR
+        ? `RAR ${best.rar7d.toFixed(2)} vs ${currentRAR.toFixed(2)}`
+        : `APY ${best.displayAPY.toFixed(1)}% vs ${currentAPY.toFixed(1)}%`;
+      const reason   = `Rebalanced: ${best.pair} ${rarLabel} (fee recovers in ${(cost / extraPerDay).toFixed(1)}d)`;
       const proceeds = this.exit(pos, reason);
       this.enter(best, proceeds, pos.allocationPct, `Rebalanced from ${pos.pair}`);
       this.lastRebalance = Date.now();
@@ -357,8 +365,8 @@ export class PortfolioManager {
   // ─── Opportunity ranking ─────────────────────────────────────────────────
   private rankedCandidates(): RankedOpportunity[] {
     return this.reporter.getLatest()
-      .filter(o => o.rar7d > 0 && o.displayAPY > 0)
-      .sort((a, b) => b.rar7d - a.rar7d);
+      .filter(o => o.displayAPY > 0)
+      .sort(rarOrApySort);
   }
 
   private openList(): MockPosition[] {
@@ -403,4 +411,12 @@ export class PortfolioManager {
   getTrades(): PortfolioTrade[] {
     return [...this.trades];
   }
+}
+
+// Prefer RAR-7d when both sides have it; otherwise rank by APY
+function rarOrApySort(a: RankedOpportunity, b: RankedOpportunity): number {
+  if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d - a.rar7d;
+  if (a.rar7d > 0) return -1;
+  if (b.rar7d > 0) return 1;
+  return b.displayAPY - a.displayAPY;
 }
