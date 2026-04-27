@@ -3,11 +3,16 @@ import cors from "cors";
 import path from "path";
 import yaml from "js-yaml";
 import fs from "fs";
-import type { ReporterAgent } from "../ReporterAgent";
+import type { ReporterAgent }    from "../ReporterAgent";
 import type { PortfolioManager } from "../PortfolioManager";
+import type { ReflectionAgent }  from "../llm/ReflectionAgent";
 import { SlippageGuard } from "../calculator/SlippageGuard";
 
-export function createApiServer(agent: ReporterAgent, portfolio: PortfolioManager): express.Application {
+export function createApiServer(
+  agent:      ReporterAgent,
+  portfolio:  PortfolioManager,
+  reflection: ReflectionAgent,
+): express.Application {
   const app = express();
   app.use(cors());
   app.use(express.json());
@@ -164,6 +169,46 @@ export function createApiServer(agent: ReporterAgent, portfolio: PortfolioManage
     res.json({ count: portfolio.getTrades().length, data: portfolio.getTrades() });
   });
 
+  // ── GET /reflections ─────────────────────────────────────────────────────────
+  app.get("/reflections", (_req: Request, res: Response) => {
+    const store = reflection.getStore();
+    res.json({
+      enabled:  reflection.isEnabled(),
+      recent:   store.getRecent(),
+      archived: store.getArchived(50),
+    });
+  });
+
+  // ── GET /reflections/stream (SSE) ─────────────────────────────────────────
+  app.get("/reflections/stream", (req: Request, res: Response) => {
+    res.writeHead(200, {
+      "Content-Type":                "text/event-stream",
+      "Cache-Control":               "no-cache",
+      "Connection":                  "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+      "X-Accel-Buffering":           "no", // disable nginx buffering if present
+    });
+
+    const send = (data: object) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Immediately hydrate the client with stored history
+    const store = reflection.getStore();
+    send({ type: "history", recent: store.getRecent(), archived: store.getArchived(50), enabled: reflection.isEnabled() });
+
+    // Subscribe to live reflection events
+    const unsub = reflection.onEvent((evt) => send(evt));
+
+    // Keepalive comment every 25s to prevent proxies from closing the connection
+    const ping = setInterval(() => res.write(": ka\n\n"), 25_000);
+
+    req.on("close", () => {
+      clearInterval(ping);
+      unsub();
+    });
+  });
+
   // ── Health ───────────────────────────────────────────────────────────────────
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", timestamp: Date.now(), poolsScanned: agent.getLatest().length });
@@ -178,8 +223,8 @@ export function createApiServer(agent: ReporterAgent, portfolio: PortfolioManage
   return app;
 }
 
-export function startApiServer(agent: ReporterAgent, portfolio: PortfolioManager, port = 3001): void {
-  const app = createApiServer(agent, portfolio);
+export function startApiServer(agent: ReporterAgent, portfolio: PortfolioManager, reflection: ReflectionAgent, port = 3001): void {
+  const app = createApiServer(agent, portfolio, reflection);
   app.listen(port, () => {
     console.log(`[API] Listening on http://localhost:${port}`);
     console.log(`[API] OpenAPI spec at http://localhost:${port}/openapi.json`);

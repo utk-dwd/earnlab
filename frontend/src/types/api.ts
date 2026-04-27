@@ -143,3 +143,25 @@ export interface PositionsResponse  { data: Position[] }
 export interface ExecutionsResponse { count: number; data: Execution[] }
 export interface PortfolioPositionsResponse { data: MockPosition[] }
 export interface PortfolioTradesResponse    { count: number; data: PortfolioTrade[] }
+
+export interface Reflection {
+  id:        number;
+  timestamp: number;
+  content:   string;
+  summary:   string;
+  archived:  boolean;
+}
+
+export interface ReflectionsResponse {
+  enabled:  boolean;
+  recent:   Reflection[];
+  archived: Reflection[];
+}
+
+// SSE event types emitted by /reflections/stream
+export type ReflectionSSEEvent =
+  | { type: "history";  recent: Reflection[]; archived: Reflection[]; enabled: boolean }
+  | { type: "start";    timestamp: number }
+  | { type: "chunk";    timestamp: number; text: string }
+  | { type: "complete"; timestamp: number; content: string; summary: string; id: number }
+  | { type: "error";    timestamp: number; error: string };
