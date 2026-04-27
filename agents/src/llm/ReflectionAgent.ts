@@ -38,6 +38,8 @@ export class ReflectionAgent {
     private reporter:  ReporterAgent,
     private portfolio: PortfolioManager,
   ) {
+    // Set enabled immediately from key presence so SSE history sends correct state
+    this.enabled = !!process.env.OPENROUTER_API_KEY;
     this.client = new OpenAI({
       baseURL: "https://openrouter.ai/api/v1",
       apiKey:  process.env.OPENROUTER_API_KEY ?? "",
@@ -55,7 +57,6 @@ export class ReflectionAgent {
     }
     await this.memory.init();
     this.running = true;
-    this.enabled = true;
     console.log(`[Reflection] Starting — interval ${REFLECT_INTERVAL_MS / 60_000}min`);
 
     // Run immediately, then on interval

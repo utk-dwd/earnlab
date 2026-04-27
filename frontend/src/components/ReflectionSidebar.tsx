@@ -154,11 +154,17 @@ export function ReflectionSidebar({ apiUrl }: Props) {
           break;
         }
         case "error": {
-          if (liveRef.current) {
-            liveRef.current.text += ` [error: ${evt.error}]`;
-            liveRef.current.done = true;
-            setLive({ ...liveRef.current });
-          }
+          // Clear the live spinner and surface the error as a persistent card
+          liveRef.current = null;
+          setLive(null);
+          const errReflection: Reflection = {
+            id:        Date.now(),
+            timestamp: evt.timestamp,
+            content:   `⚠ Reflection failed: ${evt.error}`,
+            summary:   `Error: ${evt.error}`,
+            archived:  false,
+          };
+          setRecent(prev => [errReflection, ...prev]);
           break;
         }
       }
@@ -188,8 +194,8 @@ export function ReflectionSidebar({ apiUrl }: Props) {
 
       {/* ── Not configured ── */}
       {enabled === false && (
-        <div className="rounded-lg bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
-          Add <code className="font-mono bg-gray-200 dark:bg-gray-700 px-1 rounded">OPENROUTER_API_KEY</code> to <code className="font-mono bg-gray-200 dark:bg-gray-700 px-1 rounded">.env</code> to enable hourly LLM reflections.
+        <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-3 text-xs text-amber-700 dark:text-amber-400">
+          Set <code className="font-mono bg-amber-100 dark:bg-amber-900/40 px-1 rounded">OPENROUTER_API_KEY</code> in <code className="font-mono bg-amber-100 dark:bg-amber-900/40 px-1 rounded">.env</code> and restart the agent to enable hourly AI reflections.
         </div>
       )}
 
