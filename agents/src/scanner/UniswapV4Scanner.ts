@@ -145,7 +145,7 @@ async function defiLlamaPoolsForChain(cfg: ChainConfig): Promise<PoolState[]> {
   const knownSyms  = new Set(Object.values(tokens).map((t) => t.symbol.toUpperCase()));
 
   const matches = all.filter((p: any) => {
-    if (p.project !== "uniswap-v4" && p.project !== "uniswap-v3") return false;
+    if (p.project !== "uniswap-v4") return false;
     if (p.chain !== llamaChainName) return false;
     if ((p.tvlUsd ?? 0) < MIN_TVL_USD) return false;       // ← TVL floor
 
