@@ -1,21 +1,34 @@
 openapi: 3.0.3
 info:
-  title: EarnGen Yield Hunter API
+  title: EarnYld Yield Hunter API
   description: |
-    Real-time DeFi yield discovery across Uniswap v4 testnets.
-    Scans Sepolia, Base Sepolia, Arbitrum Sepolia, and Unichain Sepolia every 60 s.
+    Real-time DeFi yield discovery across Uniswap v4 — 14 mainnets and 4 testnets, scanned every 60 s.
+
+    **Mainnet chains:** Ethereum, Unichain, Optimism, Base, Arbitrum One, Polygon, Blast,
+    Avalanche, BNB Chain, Celo, Zora, Worldchain, Ink, Soneium.
+
+    **Testnet chains:** Sepolia, Base Sepolia, Arbitrum Sepolia, Unichain Sepolia.
+
+    Set `NETWORK_FILTER=mainnet` or `NETWORK_FILTER=testnet` in `.env` to restrict scanning.
 
     ## APY Sources
-    - **live** — computed on-chain from `StateView` (liquidity, price) + `PoolManager.Swap` events (24h volume)
-    - **reference** — mainnet equivalent from DefiLlama (used when testnet volume is ~0)
+    - **live** — computed on-chain from `StateView` (liquidity, current price) + `PoolManager.Swap`
+      events over the last 24 h. Formula: `(volume24h × feeTier / TVL) × 365 × 100`.
+    - **reference** — trailing APY from DefiLlama (`yields.llama.fi/pools`, project=uniswap-v4).
+      Used when on-chain volume data is unavailable or zero. Can lag real conditions by days.
+
+    ## Risk-Adjusted Return (RAR)
+    `RAR = displayAPY / annualised_volatility` (Sharpe ratio, Rf=0).
+    Volatility is computed from hourly log-returns of the pool's most volatile token
+    over 24 h and 7 d windows via DefiLlama price history.
 
     ## Slippage Protection
-    The `/slippage/check` endpoint uses the v4 `Quoter` contract to simulate the exact
-    output before execution. Always check this before calling `UniversalRouter`.
-  version: 1.0.0
+    The `/slippage/check` endpoint calls the v4 `Quoter` contract on-chain to simulate
+    the exact output before execution. Pass `minAmountOut` to `UniversalRouter` to enforce it.
+  version: 2.0.0
   contact:
-    name: EarnGen
-    url: https://github.com/your-org/earngen
+    name: EarnYld
+    url: https://github.com/utk-dwd/earnlab
 
 servers:
   - url: http://localhost:3001
@@ -80,18 +93,20 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/RankedOpportunity" }
               example:
-                count: 4
+                count: 20
                 data:
                   - rank: 1
-                    chainName: "Sepolia"
-                    pair: "WETH/USDC"
+                    chainName: "Ethereum"
+                    pair: "AAVE/USDC"
                     feeTierLabel: "0.30%"
                     liveAPY: 0
-                    referenceAPY: 23.47
-                    displayAPY: 23.47
+                    referenceAPY: 150.18
+                    displayAPY: 150.18
                     apySource: "reference"
-                    risk: "medium"
-                    tvlUsd: 8430
+                    risk: "extreme"
+                    tvlUsd: 1200000
+                    rar7d: 1.82
+                    rar24h: 2.14
 
   /yields/{poolId}:
     get:
@@ -324,16 +339,33 @@ components:
         pair:          { type: string, example: "WETH/USDC" }
         feeTier:       { type: integer }
         feeTierLabel:  { type: string, example: "0.30%" }
-        liveAPY:       { type: number, description: "On-chain calculated APY %" }
-        referenceAPY:  { type: number, description: "Mainnet DefiLlama APY %" }
-        displayAPY:    { type: number, description: "Best available APY for display" }
-        apySource:     { type: string, enum: [live, reference] }
-        risk:          { type: string, enum: [low, medium, high, extreme] }
-        tvlUsd:        { type: number }
-        volume24hUsd:  { type: number }
+        liveAPY:
+          type: number
+          description: "On-chain APY computed from 24 h Swap volume ÷ TVL × 365. Zero if no recent on-chain data."
+        referenceAPY:
+          type: number
+          description: "Trailing APY from DefiLlama (uniswap-v4). Can lag real conditions by days."
+        displayAPY:
+          type: number
+          description: "liveAPY if > 0.01%, else referenceAPY. This is the value used for ranking."
+        apySource:     { type: string, enum: [live, reference], description: "Which source displayAPY came from" }
+        risk:          { type: string, enum: [low, medium, high, extreme], description: "low <10% / medium <30% / high <100% / extreme ≥100%" }
+        tvlUsd:        { type: number, description: "Total value locked in USD" }
+        volume24hUsd:  { type: number, description: "24 h swap volume in USD (on-chain)" }
         token0Price:   { type: number }
         token1Price:   { type: number }
-        lastUpdated:   { type: integer, description: "Unix ms timestamp" }
+        rar24h:
+          type: number
+          description: "Risk-adjusted return using 24 h volatility window. 0 = not yet computed."
+        rar7d:
+          type: number
+          description: "Risk-adjusted return using 7 d volatility window. Higher is better."
+        vol24h:        { type: number, description: "Annualised volatility % (24 h window)" }
+        vol7d:         { type: number, description: "Annualised volatility % (7 d window)" }
+        rarQuality:    { type: string, enum: [excellent, good, fair, poor, "n/a"], description: "excellent ≥2.0 / good ≥1.0 / fair ≥0.5 / poor <0.5" }
+        pairPriceChange24h: { type: number, description: "token0/token1 exchange-rate change over 24 h" }
+        pairPriceChange7d:  { type: number, description: "token0/token1 exchange-rate change over 7 d" }
+        lastUpdated:   { type: integer, description: "Unix ms timestamp of last scan" }
 
     Position:
       type: object
