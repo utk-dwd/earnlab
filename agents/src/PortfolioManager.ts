@@ -1,4 +1,6 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
+import { ZeroGMemory }  from "./storage/ZeroGMemory";
+import { LLMClient }    from "./llm/LLMClient";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INITIAL_CAPITAL_USD = 10_000;
@@ -24,11 +26,11 @@ export interface MockPosition {
   pair:            string;
   feeTierLabel:    string;
   entryTimestamp:  number;
-  entryValueUsd:   number;    // USD invested after entry fee
-  allocationPct:   number;    // % of initial capital (e.g. 25)
+  entryValueUsd:   number;
+  allocationPct:   number;
   entryAPY:        number;
   entryRAR7d:      number;
-  currentValueUsd: number;    // simulated: entryValue + accrued fees
+  currentValueUsd: number;
   earnedFeesUsd:   number;
   pnlUsd:          number;
   pnlPct:          number;
@@ -61,15 +63,16 @@ export interface PortfolioSummary {
   totalValueUsd:          number;
   unrealizedPnlUsd:       number;
   unrealizedPnlPct:       number;
-  realizedPnlUsd:         number;   // PnL locked in from closed positions
-  totalEarnedFeesUsd:     number;   // LP fee income across all positions
-  totalFeesPaidUsd:       number;   // swap fees paid to enter/exit
+  realizedPnlUsd:         number;
+  totalEarnedFeesUsd:     number;
+  totalFeesPaidUsd:       number;
   openPositions:          number;
   tradeCount:             number;
   lastRebalanceTimestamp: number | null;
+  llmEnabled:             boolean;
 }
 
-// ─── PortfolioManager ────────────────────────────────────────────────────────
+// ─── PortfolioManager ─────────────────────────────────────────────────────────
 
 export class PortfolioManager {
   private reporter:      ReporterAgent;
@@ -80,12 +83,35 @@ export class PortfolioManager {
   private lastRebalance: number | null = null;
   private running        = false;
 
+  private memory:    ZeroGMemory;
+  private llm:       LLMClient | null = null;
+  private llmReady   = false;
+
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
+    this.memory   = new ZeroGMemory();
   }
 
   async start(): Promise<void> {
     this.running = true;
+
+    // Initialise 0G memory (gracefully falls back to in-memory)
+    await this.memory.init();
+
+    // Wire up LLM client if OPENROUTER_API_KEY is set
+    if (process.env.OPENROUTER_API_KEY) {
+      const llm = new LLMClient(this.memory);
+      llm.onListOpportunities  = (limit, minRar7d, network) => this.toolListOpps(limit, minRar7d, network);
+      llm.onGetPortfolioState  = () => this.toolGetState();
+      llm.onOpenPosition       = (poolId, reason) => this.toolOpen(poolId, reason);
+      llm.onClosePosition      = (poolId, reason) => this.toolClose(poolId, reason);
+      this.llm      = llm;
+      this.llmReady = true;
+      console.log(`[Portfolio] LLM enabled — model: ${process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324"}`);
+    } else {
+      console.log("[Portfolio] OPENROUTER_API_KEY not set — running rule-based mode");
+    }
+
     console.log(`[Portfolio] Starting — $${INITIAL_CAPITAL_USD.toLocaleString()} mock capital`);
     await this.tick();
     const interval = setInterval(async () => {
@@ -99,25 +125,125 @@ export class PortfolioManager {
   // ─── Main tick ───────────────────────────────────────────────────────────
   private async tick(): Promise<void> {
     this.updateValues();
-    if (this.openList().length === 0) {
-      this.deploy();
+
+    const trigger = this.openList().length === 0 ? "deploy" : "rebalance";
+
+    if (this.llmReady && this.llm) {
+      await this.thinkWithLLM(trigger);
     } else {
-      this.rebalance();
+      if (trigger === "deploy") {
+        this.deploy();
+      } else {
+        this.rebalance();
+      }
     }
   }
 
-  // ─── Initial deployment ──────────────────────────────────────────────────
+  // ─── LLM-driven decision ─────────────────────────────────────────────────
+  private async thinkWithLLM(trigger: "deploy" | "rebalance"): Promise<void> {
+    console.log(`[Portfolio] LLM thinking (${trigger})…`);
+    try {
+      const result = await this.llm!.think(trigger);
+      console.log(`[Portfolio] LLM completed — ${result.actions.length} actions, ${result.rawTokens} tokens`);
+      if (result.reasoning) console.log(`[Portfolio] LLM reasoning: ${result.reasoning}`);
+
+      // Persist the session to 0G memory
+      const holds = result.actions.filter(a => a.type === "hold");
+      const opens = result.actions.filter(a => a.type === "open");
+      const closes = result.actions.filter(a => a.type === "close");
+
+      const summary = holds.length > 0 ? holds[0] : result.actions[result.actions.length - 1];
+      if (summary) {
+        await this.memory.append({
+          timestamp: Date.now(),
+          action:    summary.type as any,
+          poolId:    (summary as any).poolId,
+          reasoning: result.reasoning || summary.reason,
+        });
+      }
+
+      this.lastRebalance = Date.now();
+    } catch (err: any) {
+      console.warn(`[Portfolio] LLM failed (${err.message}), falling back to rule-based`);
+      if (trigger === "deploy") {
+        this.deploy();
+      } else {
+        this.rebalance();
+      }
+    }
+  }
+
+  // ─── LLM tool implementations ────────────────────────────────────────────
+
+  private toolListOpps(limit = 10, minRar7d?: number, network?: string): RankedOpportunity[] {
+    let opps = this.reporter.getLatest()
+      .filter(o => o.rar7d > 0 && o.displayAPY > 0);
+    if (minRar7d != null) opps = opps.filter(o => o.rar7d >= minRar7d);
+    if (network && network !== "all") opps = opps.filter(o => o.network === network);
+    return opps
+      .sort((a, b) => b.rar7d - a.rar7d)
+      .slice(0, Math.min(limit, 20));
+  }
+
+  private toolGetState(): { summary: PortfolioSummary; positions: MockPosition[] } {
+    return {
+      summary:   this.getSummary(),
+      positions: this.getPositions().filter(p => p.status === "open"),
+    };
+  }
+
+  private toolOpen(poolId: string, reason: string): boolean {
+    const open = this.openList();
+    if (open.length >= TARGET_POSITIONS) {
+      console.log(`[Portfolio] LLM open rejected — already at max positions (${TARGET_POSITIONS})`);
+      return false;
+    }
+    const opp = this.reporter.getLatest().find(o => o.poolId === poolId);
+    if (!opp) {
+      console.log(`[Portfolio] LLM open rejected — pool ${poolId} not found`);
+      return false;
+    }
+    if (this.positions.has(poolId) && this.positions.get(poolId)!.status === "open") {
+      console.log(`[Portfolio] LLM open rejected — already in pool ${poolId}`);
+      return false;
+    }
+
+    const n   = open.length + 1;
+    const pct = Math.min(MAX_POSITION_PCT, 1 / n);
+    this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason);
+    this.lastRebalance = Date.now();
+    console.log(`[Portfolio] LLM opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
+    return true;
+  }
+
+  private toolClose(poolId: string, reason: string): boolean {
+    const pos = this.positions.get(poolId);
+    if (!pos || pos.status !== "open") {
+      console.log(`[Portfolio] LLM close rejected — no open position for ${poolId}`);
+      return false;
+    }
+    const hoursHeld = (Date.now() - pos.entryTimestamp) / 3_600_000;
+    if (hoursHeld < MIN_HOLD_HOURS) {
+      console.log(`[Portfolio] LLM close rejected — ${pos.pair} only held ${hoursHeld.toFixed(1)}h (min ${MIN_HOLD_HOURS}h)`);
+      return false;
+    }
+    const proceeds = this.exit(pos, reason); // exit() already does this.cash += proceeds
+    console.log(`[Portfolio] LLM closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
+    return true;
+  }
+
+  // ─── Rule-based fallback: initial deployment ─────────────────────────────
   private deploy(): void {
     const candidates = this.rankedCandidates();
     if (candidates.length === 0) {
-      const total = this.reporter.getLatest().length;
+      const total   = this.reporter.getLatest().length;
       const withRar = this.reporter.getLatest().filter(o => o.rar7d > 0).length;
       console.log(`[Portfolio] Waiting for RAR data — ${withRar}/${total} pools enriched`);
       return;
     }
 
     const n   = Math.min(candidates.length, TARGET_POSITIONS);
-    const pct = Math.min(MAX_POSITION_PCT, 1 / n);   // e.g. 4 positions → 25% each
+    const pct = Math.min(MAX_POSITION_PCT, 1 / n);
 
     for (let i = 0; i < n; i++) {
       this.enter(candidates[i], INITIAL_CAPITAL_USD * pct, pct * 100, "Initial deployment");
@@ -126,7 +252,7 @@ export class PortfolioManager {
     console.log(`[Portfolio] Deployed into ${n} positions (${(pct * 100).toFixed(0)}% each)`);
   }
 
-  // ─── Rebalancing ─────────────────────────────────────────────────────────
+  // ─── Rule-based fallback: rebalancing ────────────────────────────────────
   private rebalance(): void {
     const open        = this.openList();
     const allOpps     = this.reporter.getLatest();
@@ -134,19 +260,17 @@ export class PortfolioManager {
     const inPortfolio = new Set(open.map(p => p.poolId));
 
     for (const pos of open) {
-      if (pos.status !== "open") continue;  // may have been closed earlier in this loop
+      if (pos.status !== "open") continue;
       if ((Date.now() - pos.entryTimestamp) / 3_600_000 < MIN_HOLD_HOURS) continue;
 
       const currentOpp = allOpps.find(o => o.poolId === pos.poolId);
       const currentRAR = currentOpp?.rar7d    ?? pos.entryRAR7d;
       const currentAPY = currentOpp?.displayAPY ?? pos.entryAPY;
 
-      // Best opportunity not already held
       const best = candidates.find(c => !inPortfolio.has(c.poolId));
       if (!best) continue;
       if (best.rar7d <= currentRAR * (1 + REBALANCE_THRESHOLD)) continue;
 
-      // Only switch if the extra return recovers the round-trip fee quickly enough
       const cost        = pos.currentValueUsd * (ENTRY_FEE_PCT + EXIT_FEE_PCT);
       const extraPerDay = pos.currentValueUsd * (best.displayAPY - currentAPY) / 100 / 365;
       if (extraPerDay <= 0 || cost / extraPerDay > MAX_BREAKEVEN_DAYS) continue;
@@ -163,7 +287,7 @@ export class PortfolioManager {
     }
   }
 
-  // ─── Simulated LP value accrual ─────────────────────────────────────────
+  // ─── Simulated LP value accrual ──────────────────────────────────────────
   private updateValues(): void {
     for (const pos of this.openList()) {
       const yrs           = (Date.now() - pos.entryTimestamp) / (365 * 24 * 3_600_000);
@@ -267,6 +391,7 @@ export class PortfolioManager {
       openPositions:          open.length,
       tradeCount:             this.trades.length,
       lastRebalanceTimestamp: this.lastRebalance,
+      llmEnabled:             this.llmReady,
     };
   }
 

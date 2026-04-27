@@ -97,7 +97,7 @@ export default function Dashboard() {
 
           {/* ── Stats bar ── */}
           {portfolio && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
               <StatCard label="Pools Found"      value={yields.length.toString()} />
               <StatCard label="Open Positions"   value={portfolio.openPositions.toString()} />
               <StatCard label="Total Trades"     value={portfolio.tradeCount.toString()} />
@@ -110,6 +110,11 @@ export default function Dashboard() {
                 label="Unrealised PnL"
                 value={`$${portfolio.unrealizedPnlUsd.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                 positive={portfolio.unrealizedPnlUsd >= 0}
+              />
+              <StatCard
+                label="AI Mode"
+                value={portfolio.llmEnabled ? "LLM ✓" : "Rules"}
+                positive={portfolio.llmEnabled}
               />
             </div>
           )}

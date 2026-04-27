@@ -135,6 +135,7 @@ export interface PortfolioSummary {
   openPositions:          number;
   tradeCount:             number;
   lastRebalanceTimestamp: number | null;
+  llmEnabled:             boolean;
 }
 
 export interface YieldsResponse     { count: number; data: RankedOpportunity[] }
