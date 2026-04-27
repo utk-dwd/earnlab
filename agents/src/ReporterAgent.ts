@@ -1,5 +1,5 @@
 import * as dotenv from "dotenv";
-dotenv.config({ path: "../../.env" });
+dotenv.config({ path: "../.env" });
 
 import { UniswapV4Scanner, type PoolState } from "./scanner/UniswapV4Scanner";
 import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
