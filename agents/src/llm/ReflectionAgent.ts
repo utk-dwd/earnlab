@@ -113,11 +113,7 @@ export class ReflectionAgent {
       // First non-empty line as compact summary
       const summary = fullContent.split("\n").map(l => l.trim()).find(l => l) ?? fullContent.slice(0, 150);
 
-      // Persist locally
       const id = this.store.insert(fullContent, summary);
-
-      // Persist to 0G (fire-and-forget)
-      this.memory.append({ timestamp: ts, action: "hold", reasoning: summary }).catch(() => {});
 
       this.emit({ type: "complete", timestamp: ts, content: fullContent, summary, id });
       console.log(`[Reflection] Done — ${fullContent.length} chars, id=${id}`);

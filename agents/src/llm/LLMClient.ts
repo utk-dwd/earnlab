@@ -9,7 +9,7 @@
 import OpenAI from "openai";
 import type { RankedOpportunity } from "../ReporterAgent";
 import type { MockPosition, PortfolioSummary } from "../PortfolioManager";
-import type { ZeroGMemory } from "../storage/ZeroGMemory";
+import type { ZeroGMemory, MarketConditions, DecisionRecord } from "../storage/ZeroGMemory";
 
 const MODEL         = process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324";
 const CONTEXT_LIMIT = 8;
@@ -102,9 +102,14 @@ export class LLMClient {
     summary:   PortfolioSummary,
     positions: MockPosition[],
   ): Promise<DecisionCycle> {
-    const ts     = Date.now();
-    const recent = this.memory.getRecent(CONTEXT_LIMIT);
-    const context = buildContext(opps, summary, positions, recent);
+    const ts = Date.now();
+    // Retrieve past outcomes whose market conditions most resemble the current top opportunity
+    const topOpp    = opps[0];
+    const queryCond: MarketConditions = topOpp
+      ? { rar7d: topOpp.rar7d, vol7d: topOpp.vol7d, change7d: topOpp.pairPriceChange7d * 100 }
+      : { rar7d: 0, vol7d: 10, change7d: 0 };
+    const similar   = this.memory.getSimilar(queryCond, CONTEXT_LIMIT);
+    const context   = buildContext(opps, summary, positions, similar);
 
     const response = await this.client.chat.completions.create({
       model:           MODEL,
@@ -129,7 +134,13 @@ export class LLMClient {
     positions: MockPosition[],
   ): Promise<CritiqueResult> {
     try {
-      const context  = buildCritiqueContext(decision, opp, summary, positions);
+      const conditions: MarketConditions = {
+        rar7d:    opp.rar7d,
+        vol7d:    opp.vol7d,
+        change7d: opp.pairPriceChange7d * 100,
+      };
+      const similar = this.memory.getSimilar(conditions, 3);
+      const context = buildCritiqueContext(decision, opp, summary, positions, similar);
       const response = await this.client.chat.completions.create({
         model:           MODEL,
         messages: [
@@ -153,7 +164,7 @@ function buildContext(
   opps:      RankedOpportunity[],
   summary:   PortfolioSummary,
   positions: MockPosition[],
-  recent:    any[],
+  similar:   DecisionRecord[],
 ): string {
   const oppLines = opps.slice(0, 15).map(o => {
     const il = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
@@ -170,11 +181,7 @@ function buildContext(
       }).join("\n")
     : "  (none — portfolio is empty)";
 
-  const memLines = recent.length > 0
-    ? recent.map(d =>
-        `  [${new Date(d.timestamp).toLocaleString("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}] ${d.action} ${d.poolId ?? ""} — ${d.reasoning}`
-      ).join("\n")
-    : "";
+  const simLines = fmtSimilar(similar);
 
   return [
     `Time: ${new Date().toUTCString()}`,
@@ -186,7 +193,7 @@ function buildContext(
     ``,
     `OPEN POSITIONS:`,
     posLines,
-    ...(memLines ? [``, `RECENT DECISIONS (0G memory):`, memLines] : []),
+    ...(simLines ? [``, `PAST OUTCOMES — similar market conditions (0G memory):`, simLines] : []),
   ].join("\n");
 }
 
@@ -239,6 +246,22 @@ function fmtHours(h: number): string {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+function fmtSimilar(records: DecisionRecord[]): string {
+  if (records.length === 0) return "";
+  return records.map(r => {
+    const cond = `rar=${r.conditions.rar7d > 0 ? r.conditions.rar7d.toFixed(1) : "n/a"} vol=${r.conditions.vol7d.toFixed(1)}% Δ=${r.conditions.change7d >= 0 ? "+" : ""}${r.conditions.change7d.toFixed(1)}%`;
+    const date = new Date(r.timestamp).toLocaleString("en", { month: "short", day: "numeric" });
+    if (!r.outcome) {
+      return `  [${date}] ${r.decision.action} ${r.pair} on ${r.chainName} | ${cond} | (still open)`;
+    }
+    const { actualAPY, netReturn, daysHeld, closeReason } = r.outcome;
+    const sign   = netReturn >= 0 ? "+" : "";
+    const result = netReturn >= 0 ? "✓" : "✗";
+    const why    = closeReason ? ` (${closeReason.slice(0, 40)})` : "";
+    return `  [${date}] ${r.decision.action} ${r.pair} on ${r.chainName} | ${cond} → ${daysHeld.toFixed(1)}d | APY=${actualAPY.toFixed(0)}% ret=${sign}$${netReturn.toFixed(2)} ${result}${why}`;
+  }).join("\n");
+}
+
 // ─── Critic prompt ────────────────────────────────────────────────────────────
 
 const CRITIC_PROMPT = `You are EarnYld's adversarial risk critic. Your sole job is to find every reason NOT to enter a proposed LP position.
@@ -271,6 +294,7 @@ function buildCritiqueContext(
   opp:       RankedOpportunity,
   summary:   PortfolioSummary,
   positions: MockPosition[],
+  similar:   DecisionRecord[],
 ): string {
   const il    = opp.expectedIL > 0 ? `${opp.expectedIL.toFixed(1)}%` : "n/a";
   const net   = opp.expectedIL > 0 ? `${opp.netAPY.toFixed(1)}% (after IL)` : `${opp.displayAPY.toFixed(1)}% (IL unquantified)`;
@@ -278,6 +302,8 @@ function buildCritiqueContext(
   const posLines = positions.length > 0
     ? positions.map(p => `  ${p.pair} | ${p.chainName} | APY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}`).join("\n")
     : "  (none)";
+
+  const simLines = fmtSimilar(similar);
 
   return [
     `SEEKER PROPOSES: ${decision.action.toUpperCase()} ${opp.pair} on ${opp.chainName}`,
@@ -301,6 +327,7 @@ function buildCritiqueContext(
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,
     posLines,
+    ...(simLines ? [``, `PAST OUTCOMES — 3 closest market conditions (0G memory):`, simLines] : []),
   ].join("\n");
 }
 

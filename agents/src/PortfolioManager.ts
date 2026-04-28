@@ -1,5 +1,6 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
+import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
 import { TICK_SPACINGS } from "./config/chains";
@@ -195,18 +196,6 @@ export class PortfolioManager {
         await this.executeDecision(d);
       }
 
-      // Persist primary (non-hold) decision to 0G memory
-      const primary = cycle.decisions.find(d => d.action !== "hold" && d.action !== "wait")
-        ?? cycle.decisions[0];
-      if (primary) {
-        await this.memory.append({
-          timestamp: cycle.timestamp,
-          action:    primary.action as any,
-          poolId:    primary.pool,
-          reasoning: cycle.reasoning || primary.reasoning,
-        });
-      }
-
       this.lastRebalance = Date.now();
     } catch (err: any) {
       console.warn(`[Portfolio] LLM failed (${err.message}), falling back to rule-based`);
@@ -229,7 +218,7 @@ export class PortfolioManager {
           }
           console.log(`[Portfolio] Critic approved ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%): ${critique.reasoning}`);
         }
-        this.toolOpen(d.pool, d.reasoning, d.allocationPct);
+        this.toolOpen(d.pool, d.reasoning, d.allocationPct, d);
         break;
       }
 
@@ -251,7 +240,7 @@ export class PortfolioManager {
             console.log(`[Portfolio] Critic approved rebalance into ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%)`);
           }
           if (worst) this.toolClose(worst.poolId, `Rebalancing into ${d.pool}: ${d.reasoning}`);
-          this.toolOpen(d.pool, d.reasoning, d.allocationPct);
+          this.toolOpen(d.pool, d.reasoning, d.allocationPct, d);
         }
         break;
       }
@@ -282,7 +271,7 @@ export class PortfolioManager {
     };
   }
 
-  private toolOpen(poolId: string, reason: string, allocationPct?: number): boolean {
+  private toolOpen(poolId: string, reason: string, allocationPct?: number, agentDecision?: AgentDecision): boolean {
     const open = this.openList();
     if (open.length >= TARGET_POSITIONS) {
       console.log(`[Portfolio] open rejected — already at max positions (${TARGET_POSITIONS})`);
@@ -303,7 +292,7 @@ export class PortfolioManager {
       ? Math.min(allocationPct / 100, MAX_POSITION_PCT)
       : this.kellyAllocation(opp);
 
-    this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason);
+    this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason, agentDecision);
     this.lastRebalance = Date.now();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
     return true;
@@ -489,13 +478,39 @@ export class PortfolioManager {
   }
 
   // ─── Trade helpers ───────────────────────────────────────────────────────
-  private enter(opp: RankedOpportunity, spend: number, allocationPct: number, reason: string): void {
+  private enter(
+    opp:           RankedOpportunity,
+    spend:         number,
+    allocationPct: number,
+    reason:        string,
+    agentDecision?: AgentDecision,
+  ): void {
     const fee      = spend * ENTRY_FEE_PCT;
     const invested = spend - fee;
     this.cash     -= spend;
     this.feesPaid += fee;
 
     const { tickLower, tickUpper, halfRangePct } = computeTickRange(opp);
+
+    const conditions: MarketConditions = {
+      rar7d:    opp.rar7d,
+      vol7d:    opp.vol7d,
+      change7d: opp.pairPriceChange7d * 100,
+    };
+    const decisionSummary: DecisionSummary = agentDecision ? {
+      action:             agentDecision.action as DecisionSummary["action"],
+      confidence:         agentDecision.confidence,
+      allocationPct:      agentDecision.allocationPct,
+      reasoning:          agentDecision.reasoning,
+      vetoed:             false,
+      critiqueReasoning:  agentDecision.critique?.reasoning,
+    } : {
+      action:     "enter",
+      confidence: 1,
+      reasoning:  reason,
+      vetoed:     false,
+    };
+    this.memory.recordEntry(opp.poolId, opp.pair, opp.chainName, conditions, decisionSummary);
 
     const pos: MockPosition = {
       id:              nextId(),
@@ -535,6 +550,17 @@ export class PortfolioManager {
     const proceeds = pos.currentValueUsd - fee;
     this.cash     += proceeds;
     this.feesPaid += fee;
+
+    const outcome: DecisionOutcome = {
+      actualAPY:   pos.hoursHeld >= 1
+        ? (pos.earnedFeesUsd / pos.entryValueUsd) / pos.hoursHeld * 8760 * 100
+        : 0,
+      ilCost:      0,
+      netReturn:   proceeds - pos.entryValueUsd,
+      daysHeld:    pos.hoursHeld / 24,
+      closeReason: reason,
+    };
+    this.memory.recordExit(pos.poolId, outcome);
 
     pos.status          = "closed";
     pos.closedTimestamp = Date.now();
