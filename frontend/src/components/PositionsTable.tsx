@@ -1,5 +1,6 @@
 "use client";
 
+import { Fragment } from "react";
 import type { MockPosition, PortfolioSummary } from "../types/api";
 
 interface Props {
@@ -259,8 +260,8 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                 const COL_SPAN      = 13;
 
                 return (
-                  <>
-                  <tr key={pos.id}
+                  <Fragment key={pos.id}>
+                  <tr
                     className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors ${
                       pos.status === "closed" ? "opacity-70" : ""
                     } ${alertCount > 0 ? "border-l-2 border-amber-400" : ""}`}>
@@ -359,7 +360,7 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                       colSpan={COL_SPAN}
                     />
                   )}
-                  </>
+                  </Fragment>
                 );
               })}
             </tbody>
