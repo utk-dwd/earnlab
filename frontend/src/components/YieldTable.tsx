@@ -10,7 +10,7 @@ interface Props {
 }
 
 type NetworkFilter = "all" | "mainnet" | "testnet";
-type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd" | "liquidityQuality";
+type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd" | "liquidityQuality" | "apyPersistence";
 
 // ─── Tooltip component (portal-based to escape overflow containers) ───────────
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
@@ -71,6 +71,24 @@ const RAR_TOOLTIP_7D = `Risk-Adjusted Return (7 d)
 Higher = better return per unit of risk.
 Equivalent to Sharpe ratio (Rf = 0).
 "…" = volatility still loading.`;
+
+const PERSIST_TOOLTIP = `APY Persistence
+= min(medianFeeAPY_7d / currentFeeAPY, 1.0)
+
+Measures whether the current APY reflects
+sustained fee generation or a temporary spike.
+
+  100% = current APY ≤ 7-day median (durable)
+   13% = current APY is 7.5× the median (spike!)
+
+The 7-day median is built from hourly snapshots
+stored while the agent runs.  Shows "…" for the
+first 6 hours (not enough history yet).
+
+Used as a direct multiplier on RAR in ranking:
+  RAR × √(lq/100) × persistence
+A 150% APY pool with 13% persistence ranks far
+below an 80% APY pool with 95% persistence.`;
 
 const LQ_TOOLTIP = `Liquidity Quality Score (0–100)
 = geomean(TVL, activity, stability, depth)
@@ -183,6 +201,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           <option value="tvlUsd">Sort: TVL</option>
           <option value="volume24hUsd">Sort: Volume 24h</option>
           <option value="liquidityQuality">Sort: LQ Score</option>
+          <option value="apyPersistence">Sort: Persistence</option>
         </select>
 
         <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
@@ -201,6 +220,12 @@ export function YieldTable({ opportunities, isLoading }: Props) {
               <th className="px-3 py-3">Pair</th>
               <th className="px-3 py-3">Fee</th>
               <th className="px-3 py-3">Fee APY</th>
+              <th className="px-3 py-3">
+                <Tooltip text={PERSIST_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Persist</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
               <th className="px-3 py-3">
                 <Tooltip text={NET_APY_TOOLTIP}>
                   <span className="border-b border-dashed border-gray-400 cursor-help">Net APY ★</span>
@@ -249,10 +274,10 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {isLoading && filtered.length === 0 && (
-              <tr><td colSpan={15} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
+              <tr><td colSpan={16} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
             )}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={15} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
+              <tr><td colSpan={16} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
             )}
             {filtered.map((o) => (
               <tr key={`${o.chainId}-${o.poolId}`}
@@ -270,6 +295,9 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                   <span className={`tabular-nums ${apyColor(o.displayAPY)}`}>
                     {o.displayAPY.toFixed(2)}%
                   </span>
+                </td>
+                <td className="px-3 py-2.5">
+                  <PersistenceCell persistence={o.apyPersistence} median={o.medianAPY7d} current={o.displayAPY} />
                 </td>
                 <td className="px-3 py-2.5">
                   <NetAPYCell feeAPY={o.displayAPY} expectedIL={o.expectedIL} netAPY={o.netAPY} />
@@ -313,6 +341,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
         <span><strong>Net APY ★</strong> = Fee APY − Expected IL &nbsp;·&nbsp; default sort</span>
         <span><strong>RAR</strong> = APY ÷ annualised vol (Sharpe, Rf=0) &nbsp;·&nbsp; higher is better</span>
         <span><strong>LQ</strong> = liquidity quality 0–100 &nbsp;·&nbsp; used as √(lq/100) multiplier on RAR ranking</span>
+        <span><strong>Persist</strong> = medianAPY7d / currentAPY &nbsp;·&nbsp; &lt;50% = volume spike, not durable yield</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -386,6 +415,25 @@ function SourceBadge({ source }: { source: string }) {
         : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"}`}>
       {source === "live" ? "live" : "ref"}
     </span>
+  );
+}
+
+function PersistenceCell({ persistence, median, current }: {
+  persistence: number; median: number; current: number;
+}) {
+  if (!median) return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  const pct   = Math.round(persistence * 100);
+  const color = pct >= 80 ? "text-emerald-600 dark:text-emerald-400"
+    : pct >= 50 ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  const spike = pct < 50;
+  const tip   = `Persistence: ${pct}%\nCurrent APY: ${current.toFixed(1)}%\n7d median: ${median.toFixed(1)}%\n${spike ? "⚡ Likely volume spike" : "Yield appears durable"}`;
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono tabular-nums text-xs cursor-help ${color}`}>
+        {spike && <span className="mr-0.5">⚡</span>}{pct}%
+      </span>
+    </Tooltip>
   );
 }
 

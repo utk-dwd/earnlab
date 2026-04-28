@@ -105,3 +105,16 @@ export function computeLiquidityQuality(
 export function lqRankFactor(liquidityQuality: number): number {
   return Math.sqrt(Math.max(0, liquidityQuality) / 100);
 }
+
+/**
+ * Combined rank multiplier: LQ quality × APY persistence.
+ *
+ * Both are applied so a pool must be both liquid-quality AND show durable yield
+ * to rank highly.  Examples:
+ *   lq=80, persist=0.9  → 0.894 × 0.90 = 0.80   (solid pool, persistent APY)
+ *   lq=70, persist=0.13 → 0.837 × 0.13 = 0.11   (decent pool, one-day spike)
+ *   lq=20, persist=1.0  → 0.447 × 1.00 = 0.45   (thin pool, but APY is stable)
+ */
+export function rankFactor(liquidityQuality: number, apyPersistence: number): number {
+  return lqRankFactor(liquidityQuality) * Math.max(0, Math.min(apyPersistence, 1.0));
+}

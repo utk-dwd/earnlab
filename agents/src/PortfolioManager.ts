@@ -5,7 +5,7 @@ import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
 import { TICK_SPACINGS, gasBreakEvenDays } from "./config/chains";
 import type { FeeTier } from "./config/chains";
-import { lqRankFactor } from "./calculator/LiquidityQualityCalculator";
+import { rankFactor } from "./calculator/LiquidityQualityCalculator";
 
 // ─── Regime ───────────────────────────────────────────────────────────────────
 export type MacroRegime = "risk-off" | "neutral" | "risk-on";
@@ -846,13 +846,13 @@ function correlationGuardCheck(
 }
 
 // Prefer RAR-7d when both sides have it; otherwise rank by net APY (fee APY − expected IL)
-// LQ-adjusted ranking: sqrt(lq/100) softens the penalty so a 50-score pool
-// isn't completely buried, but a 20-score spike pool drops well below solid ones.
+// Combined rank factor: sqrt(lq/100) × persistence.
+// Pools with low LQ or spiking APY both rank lower, independently.
 function rarOrApySort(a: RankedOpportunity, b: RankedOpportunity): number {
-  const la = lqRankFactor(a.liquidityQuality ?? 50);
-  const lb = lqRankFactor(b.liquidityQuality ?? 50);
-  if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d * lb - a.rar7d * la;
+  const fa = rankFactor(a.liquidityQuality ?? 50, a.apyPersistence ?? 1.0);
+  const fb = rankFactor(b.liquidityQuality ?? 50, b.apyPersistence ?? 1.0);
+  if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d * fb - a.rar7d * fa;
   if (a.rar7d > 0) return -1;
   if (b.rar7d > 0) return 1;
-  return b.netAPY * lb - a.netAPY * la;
+  return b.netAPY * fb - a.netAPY * fa;
 }

@@ -5,7 +5,8 @@ import { UniswapV4Scanner, type PoolState } from "./scanner/UniswapV4Scanner";
 import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
 import { SlippageGuard } from "./calculator/SlippageGuard";
 import { computePairRAR, type RARResult } from "./calculator/VolatilityCalculator";
-import { computeLiquidityQuality, lqRankFactor } from "./calculator/LiquidityQualityCalculator";
+import { computeLiquidityQuality, lqRankFactor, rankFactor } from "./calculator/LiquidityQualityCalculator";
+import { APYHistoryStore } from "./storage/APYHistoryStore";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
 import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
 
@@ -59,15 +60,29 @@ export interface RankedOpportunity {
    * Used as a √(lq/100) multiplier on RAR for final ranking.
    */
   liquidityQuality: number;
+  /**
+   * 7-day median fee APY (0 = fewer than 6 hourly samples recorded yet).
+   * Populated from APYHistoryStore; becomes accurate after ≥6h of agent uptime.
+   */
+  medianAPY7d: number;
+  /**
+   * APY persistence = min(medianAPY7d / currentAPY, 1.0).
+   * 1.0 = APY is at or below the 7-day median (sustained or improving).
+   * < 1.0 = current APY is above median — potential volume spike.
+   * Defaults to 1.0 until 6h of history are collected.
+   */
+  apyPersistence: number;
   lastUpdated:   number;
 }
 
 export class ReporterAgent {
-  private scanner  = new UniswapV4Scanner();
-  private slippage = new SlippageGuard();
-  private history  = new ExecutionHistory();
-  private latest:  RankedOpportunity[] = [];
-  private running  = false;
+  private scanner    = new UniswapV4Scanner();
+  private slippage   = new SlippageGuard();
+  private history    = new ExecutionHistory();
+  private apyHistory = new APYHistoryStore();
+  private latest:    RankedOpportunity[] = [];
+  private running    = false;
+  private scanCount  = 0;
 
   async start(): Promise<void> {
     this.running = true;
@@ -101,9 +116,15 @@ export class ReporterAgent {
     const ranked = this.rankBasic(pools).slice(0, TOP_N);
     this.latest  = ranked; // serve immediately without waiting for vol
 
-    // Compute RAR for top N in background — updates this.latest in-place
+    // Record APY snapshots + compute persistence synchronously (SQLite, fast)
+    this.enrichPersistence(ranked);
+
+    // Prune old history rows every 100 scans (~100 min at default interval)
+    if (++this.scanCount % 100 === 0) this.apyHistory.prune();
+
+    // Compute RAR for top N in background — re-sorts with full data when done
     this.enrichRAR(ranked).then(() => {
-      console.log(`[Reporter] RAR computed for ${ranked.length} pools`);
+      console.log(`[Reporter] RAR + persistence computed for ${ranked.length} pools`);
     });
 
     console.log(`[Reporter] ${pools.length} pools → top ${ranked.length} (${Date.now() - t0}ms)`);
@@ -157,6 +178,8 @@ export class ReporterAgent {
           expectedIL:           prev?.expectedIL           ?? 0,
           netAPY:               prev?.netAPY               ?? displayAPY,
           liquidityQuality:     prev?.liquidityQuality     ?? lq.score,
+          medianAPY7d:          prev?.medianAPY7d          ?? 0,
+          apyPersistence:       prev?.apyPersistence       ?? 1.0,
           lastUpdated:  p.lastUpdated,
           // stash addresses for RAR calc
           _token0Address: p.poolKey.currency0,
@@ -165,7 +188,10 @@ export class ReporterAgent {
           _token1Symbol:  p.token1Symbol,
         } as any;
       })
-      .sort((a, b) => b.displayAPY * lqRankFactor(b.liquidityQuality) - a.displayAPY * lqRankFactor(a.liquidityQuality))
+      .sort((a, b) =>
+        b.displayAPY * rankFactor(b.liquidityQuality, b.apyPersistence) -
+        a.displayAPY * rankFactor(a.liquidityQuality, a.apyPersistence)
+      )
       .map((o, i) => ({ ...o, rank: i + 1 }));
   }
 
@@ -205,29 +231,47 @@ export class ReporterAgent {
         ).score;
       })
     );
-    // Re-sort and re-rank: LQ-adjusted RAR (or netAPY when RAR unavailable)
+    // Re-sort and re-rank: LQ + persistence adjusted RAR (or netAPY fallback)
     ranked.sort((a, b) => {
-      const sa = (a.rar7d > 0 ? a.rar7d : a.netAPY / 50) * lqRankFactor(a.liquidityQuality);
-      const sb = (b.rar7d > 0 ? b.rar7d : b.netAPY / 50) * lqRankFactor(b.liquidityQuality);
+      const fa = rankFactor(a.liquidityQuality, a.apyPersistence);
+      const fb = rankFactor(b.liquidityQuality, b.apyPersistence);
+      const sa = (a.rar7d > 0 ? a.rar7d : a.netAPY / 50) * fa;
+      const sb = (b.rar7d > 0 ? b.rar7d : b.netAPY / 50) * fb;
       return sb - sa;
     });
     ranked.forEach((o, i) => { o.rank = i + 1; });
   }
 
+  // ─── APY persistence ─────────────────────────────────────────────────────
+  // Record each pool's current APY and compute persistence from the 7d median.
+  // Synchronous (SQLite), runs before enrichRAR so the final re-sort uses it.
+  private enrichPersistence(ranked: RankedOpportunity[]): void {
+    for (const opp of ranked) {
+      this.apyHistory.record(opp.poolId, opp.displayAPY);
+      const median = this.apyHistory.getMedian7d(opp.poolId);
+      if (median !== null && opp.displayAPY > 0) {
+        opp.medianAPY7d   = +median.toFixed(2);
+        opp.apyPersistence = +Math.min(median / opp.displayAPY, 1.0).toFixed(4);
+      }
+      // If no history yet, leave defaults (medianAPY7d=0, apyPersistence=1.0)
+    }
+  }
+
   // ─── Console table ────────────────────────────────────────────────────────
   private printTable(opps: RankedOpportunity[]): void {
     console.log(
-      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"RAR-24h".padEnd(9)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} ${"LQ".padEnd(6)} Risk`
+      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"Med7d".padEnd(8)} ${"Persist".padEnd(8)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} ${"LQ".padEnd(5)} Risk`
     );
-    console.log("─".repeat(96));
+    console.log("─".repeat(104));
     for (const o of opps) {
-      const rar24 = o.rar24h > 0 ? o.rar24h.toFixed(2) : "…";
-      const rar7d = o.rar7d  > 0 ? o.rar7d.toFixed(2)  : "…";
-      const lq    = o.liquidityQuality > 0 ? String(o.liquidityQuality) : "…";
+      const rar7d   = o.rar7d    > 0 ? o.rar7d.toFixed(2)           : "…";
+      const med     = o.medianAPY7d > 0 ? formatAPY(o.medianAPY7d)  : "…";
+      const persist = o.medianAPY7d > 0 ? (o.apyPersistence * 100).toFixed(0) + "%" : "…";
+      const lq      = o.liquidityQuality > 0 ? String(o.liquidityQuality) : "…";
       console.log(
         `${String(o.rank).padEnd(4)} ${o.chainName.padEnd(17)} ${o.pair.padEnd(13)} ` +
-        `${formatAPY(o.displayAPY).padEnd(9)} ${rar24.padEnd(9)} ${rar7d.padEnd(9)} ` +
-        `$${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${lq.padEnd(6)} ${o.risk}`
+        `${formatAPY(o.displayAPY).padEnd(9)} ${med.padEnd(8)} ${persist.padEnd(8)} ` +
+        `${rar7d.padEnd(9)} $${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${lq.padEnd(5)} ${o.risk}`
       );
     }
   }

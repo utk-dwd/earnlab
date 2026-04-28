@@ -32,6 +32,8 @@ export interface RankedOpportunity {
   expectedIL:           number;
   netAPY:               number;
   liquidityQuality:     number;
+  medianAPY7d:          number;
+  apyPersistence:       number;
   lastUpdated:          number;
 }
 

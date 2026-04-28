@@ -172,8 +172,11 @@ function buildContext(
     const net   = o.expectedIL > 0 ? `netAPY=${o.netAPY.toFixed(1)}%` : `netAPY=${o.displayAPY.toFixed(1)}%`;
     const be    = gasBreakEvenDays(o.chainId, 2500, o.displayAPY);
     const beLabel = be === Infinity ? "be=∞" : be > 99 ? "be=>99d" : `be=${be.toFixed(1)}d`;
-    const lqLabel = o.liquidityQuality > 0 ? `lq=${o.liquidityQuality}` : "lq=?";
-    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel}`;
+    const lqLabel      = o.liquidityQuality > 0 ? `lq=${o.liquidityQuality}` : "lq=?";
+    const persistLabel = o.medianAPY7d > 0
+      ? `persist=${(o.apyPersistence * 100).toFixed(0)}%(med=${o.medianAPY7d.toFixed(0)}%)`
+      : "persist=?";
+    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel} | ${persistLabel}`;
   }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
@@ -306,6 +309,7 @@ Challenge every proposed entry. Look hard for:
 - TVL red flags: low TVL means thin liquidity, high slippage, and rug exposure
 - APY mirage: unsustainably high APY driven by one-off volume spikes — will it revert? Check lq score: < 40 is a strong warning
 - Liquidity quality: lq/100 composite score (TVL adequacy × vol/TVL activity × APY stability × depth). Score < 40 = thin/unstable pool; weight this heavily
+- APY persistence: medianAPY7d / currentAPY. If persist < 50%, the current APY is a spike vs the 7-day median — treat as temporary, not durable yield
 - Overconcentration: does the portfolio already hold similar token exposure?
 - Stale data: if RAR is n/a, you have incomplete information — is that acceptable?
 - Opportunity cost: is this meaningfully better than cash given the risks?
@@ -369,6 +373,7 @@ function buildCritiqueContext(
     `  Allocation:     ${alloc} of $${summary.totalCapitalUsd} total capital`,
     `  Gas break-even: ${beLabel} (entry+exit gas vs LP fees at this size)`,
     `  Liquidity quality: ${opp.liquidityQuality > 0 ? opp.liquidityQuality + "/100" : "?"} (TVL adequacy × vol/TVL activity × APY stability × depth vs vol)`,
+    `  APY persistence:   ${opp.medianAPY7d > 0 ? `${(opp.apyPersistence * 100).toFixed(0)}% — current ${opp.displayAPY.toFixed(1)}% vs 7d median ${opp.medianAPY7d.toFixed(1)}%` : "? (collecting history)"}`,
     ``,
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,
