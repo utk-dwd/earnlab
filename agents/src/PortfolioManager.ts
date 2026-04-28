@@ -3,7 +3,7 @@ import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
-import { TICK_SPACINGS } from "./config/chains";
+import { TICK_SPACINGS, gasBreakEvenDays } from "./config/chains";
 import type { FeeTier } from "./config/chains";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -301,6 +301,13 @@ export class PortfolioManager {
       return false;
     }
 
+    // Gas break-even guard: skip if gas costs take more than MAX_BREAKEVEN_DAYS to recover
+    const beDays = gasBreakEvenDays(opp.chainId, INITIAL_CAPITAL_USD * pct, opp.displayAPY);
+    if (beDays > MAX_BREAKEVEN_DAYS) {
+      console.log(`[Portfolio] Gas break-even ${beDays.toFixed(1)}d > ${MAX_BREAKEVEN_DAYS}d — skip ${opp.pair} on ${opp.chainName}`);
+      return false;
+    }
+
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason, agentDecision);
     this.lastRebalance = Date.now();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
@@ -358,6 +365,12 @@ export class PortfolioManager {
       if (blocked) {
         const curPct = ((hypExposure.get(blocked) ?? 0) / INITIAL_CAPITAL_USD * 100).toFixed(1);
         console.log(`[Portfolio] Deploy: skip ${c.pair} — ${blocked} already at ${curPct}% (correlation limit)`);
+        continue;
+      }
+
+      const beDays = gasBreakEvenDays(c.chainId, valueUsd, c.displayAPY);
+      if (beDays > MAX_BREAKEVEN_DAYS) {
+        console.log(`[Portfolio] Deploy: skip ${c.pair} on ${c.chainName} — gas break-even ${beDays.toFixed(1)}d`);
         continue;
       }
 

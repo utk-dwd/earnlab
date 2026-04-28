@@ -402,6 +402,40 @@ export const TESTNET_CHAINS: ChainConfig[] = [
   },
 ];
 
+// ─── Per-chain LP gas cost estimates (USD, one-way: entry or exit) ───────────
+// Assumes ~250k gas units for addLiquidity/removeLiquidity.
+// Ethereum is expensive; L2s use much lower L1 data + execution costs.
+export const GAS_COST_USD: Record<number, number> = {
+  1:        25.00,  // Ethereum mainnet
+  130:       0.05,  // Unichain
+  10:        0.10,  // Optimism
+  8453:      0.10,  // Base
+  42161:     0.20,  // Arbitrum One
+  137:       0.10,  // Polygon
+  81457:     0.10,  // Blast
+  43114:     0.30,  // Avalanche
+  56:        0.20,  // BNB Chain
+  42220:     0.05,  // Celo
+  7777777:   0.05,  // Zora
+  480:       0.10,  // Worldchain
+  57073:     0.05,  // Ink
+  1868:      0.05,  // Soneium
+  11155111:  0.10,  // Sepolia
+  84532:     0.10,  // Base Sepolia
+  421614:    0.10,  // Arbitrum Sepolia
+  1301:      0.05,  // Unichain Sepolia
+};
+
+const GAS_COST_USD_DEFAULT = 1.00;  // fallback for unlisted chains
+
+/** Days until LP fees pay back both entry and exit gas at this APY and position size. */
+export function gasBreakEvenDays(chainId: number, positionValueUsd: number, apy: number): number {
+  const gasCost   = GAS_COST_USD[chainId] ?? GAS_COST_USD_DEFAULT;
+  const dailyFees = positionValueUsd * (apy / 100) / 365;
+  if (dailyFees <= 0) return Infinity;
+  return (gasCost * 2) / dailyFees;
+}
+
 // ─── Combined + helpers ──────────────────────────────────────────────────────
 
 export const ALL_CHAINS: ChainConfig[] = [...MAINNET_CHAINS, ...TESTNET_CHAINS];

@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import type { RankedOpportunity } from "../ReporterAgent";
 import type { MockPosition, PortfolioSummary } from "../PortfolioManager";
 import type { ZeroGMemory, MarketConditions, DecisionRecord } from "../storage/ZeroGMemory";
+import { gasBreakEvenDays } from "../config/chains";
 
 const MODEL         = process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324";
 const CONTEXT_LIMIT = 8;
@@ -167,9 +168,11 @@ function buildContext(
   similar:   DecisionRecord[],
 ): string {
   const oppLines = opps.slice(0, 15).map(o => {
-    const il = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
+    const il  = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
     const net = o.expectedIL > 0 ? `netAPY=${o.netAPY.toFixed(1)}%` : `netAPY=${o.displayAPY.toFixed(1)}%`;
-    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}%`;
+    const be  = gasBreakEvenDays(o.chainId, 2500, o.displayAPY);  // ~25% of $10k typical position
+    const beLabel = be === Infinity ? "be=∞" : be > 99 ? "be=>99d" : `be=${be.toFixed(1)}d`;
+    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel}`;
   }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
@@ -308,6 +311,9 @@ function buildCritiqueContext(
   const il    = opp.expectedIL > 0 ? `${opp.expectedIL.toFixed(1)}%` : "n/a";
   const net   = opp.expectedIL > 0 ? `${opp.netAPY.toFixed(1)}% (after IL)` : `${opp.displayAPY.toFixed(1)}% (IL unquantified)`;
   const alloc = decision.allocationPct != null ? `${decision.allocationPct.toFixed(1)}%` : "Kelly-sized";
+  const posSize = ((decision.allocationPct ?? 10) / 100) * summary.totalCapitalUsd;
+  const be      = gasBreakEvenDays(opp.chainId, posSize, opp.displayAPY);
+  const beLabel = be === Infinity ? "∞" : be > 99 ? ">99d" : `${be.toFixed(1)}d`;
   const posLines = positions.length > 0
     ? positions.map(p => `  ${p.pair} | ${p.chainName} | APY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}`).join("\n")
     : "  (none)";
@@ -347,6 +353,7 @@ function buildCritiqueContext(
     `  Token1 Δ7d:     ${(opp.token1PriceChange7d * 100).toFixed(1)}%`,
     `  Pair price Δ7d: ${(opp.pairPriceChange7d * 100).toFixed(1)}%`,
     `  Allocation:     ${alloc} of $${summary.totalCapitalUsd} total capital`,
+    `  Gas break-even: ${beLabel} (entry+exit gas vs LP fees at this size)`,
     ``,
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,
