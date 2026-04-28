@@ -270,11 +270,10 @@ export class PortfolioManager {
       return false;
     }
 
-    // Use LLM-requested allocation if provided and within bounds; else default 1/n
-    const defaultPct = Math.min(MAX_POSITION_PCT, 1 / (open.length + 1));
+    // Use LLM-requested allocation if provided; else Kelly-inspired sizing
     const pct = allocationPct != null
       ? Math.min(allocationPct / 100, MAX_POSITION_PCT)
-      : defaultPct;
+      : this.kellyAllocation(opp);
 
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason);
     this.lastRebalance = Date.now();
@@ -298,6 +297,17 @@ export class PortfolioManager {
     return true;
   }
 
+  // ─── Kelly-inspired position sizing ─────────────────────────────────────
+  // f* = (RAR − 1) / RAR, scaled to ¼ Kelly, capped at MAX_POSITION_PCT.
+  // Falls back to equal-weight when RAR ≤ 1 or unavailable.
+  private kellyAllocation(opp: RankedOpportunity): number {
+    if (opp.rar7d > 1) {
+      const full = (opp.rar7d - 1) / opp.rar7d;
+      return Math.min(full * 0.25, MAX_POSITION_PCT);
+    }
+    return MAX_POSITION_PCT / TARGET_POSITIONS;  // equal-weight fallback
+  }
+
   // ─── Rule-based fallback: initial deployment ─────────────────────────────
   private deploy(): void {
     const candidates = this.rankedCandidates();
@@ -307,13 +317,20 @@ export class PortfolioManager {
     }
 
     const n   = Math.min(candidates.length, TARGET_POSITIONS);
-    const pct = Math.min(MAX_POSITION_PCT, 1 / n);
+    const top = candidates.slice(0, n);
+
+    // Compute raw Kelly allocations then normalize so they sum to ≤ 1
+    const rawFracs = top.map(c => this.kellyAllocation(c));
+    const rawSum   = rawFracs.reduce((a, b) => a + b, 0);
+    const scale    = rawSum > 1 ? 1 / rawSum : 1;
 
     for (let i = 0; i < n; i++) {
-      this.enter(candidates[i], INITIAL_CAPITAL_USD * pct, pct * 100, "Initial deployment");
+      const pct = rawFracs[i] * scale;
+      const usd = INITIAL_CAPITAL_USD * pct;
+      this.enter(top[i], usd, pct * 100, "Initial deployment");
+      console.log(`[Portfolio] Deployed ${top[i].pair} Kelly=${(rawFracs[i]*100).toFixed(1)}% → allocated ${(pct*100).toFixed(1)}% ($${usd.toFixed(0)})`);
     }
     this.lastRebalance = Date.now();
-    console.log(`[Portfolio] Deployed into ${n} positions (${(pct * 100).toFixed(0)}% each)`);
   }
 
   // ─── Rule-based fallback: rebalancing ────────────────────────────────────

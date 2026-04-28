@@ -301,6 +301,9 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                     {/* Invested */}
                     <td className="px-3 py-3 text-right tabular-nums font-mono text-gray-700 dark:text-gray-300">
                       {fmtUsd(pos.entryValueUsd)}
+                      {pos.allocationPct > 0 && (
+                        <div className="text-xs text-gray-400 mt-0.5">{pos.allocationPct.toFixed(1)}%</div>
+                      )}
                     </td>
 
                     {/* Entry APY */}
