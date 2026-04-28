@@ -473,7 +473,8 @@ export class ReporterAgent {
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
-  getLatest()   { return this.latest; }
+  getLatest()          { return this.latest; }
+  getApyHistoryStore() { return this.apyHistory; }
   getHistory(opts?: Parameters<ExecutionHistory["getExecutions"]>[0]) { return this.history.getExecutions(opts); }
   getPositions()    { return this.history.getOpenPositions(); }
   getAllPositions()  { return this.history.getAllPositions(); }

@@ -26,18 +26,35 @@ import type { MockPosition }   from "../PortfolioManager";
 import type { RankedOpportunity } from "../ReporterAgent";
 import type { MacroRegime }    from "../PortfolioManager";
 
-// ─── Weights (must sum to 1.0) ────────────────────────────────────────────────
+// ─── Regime-conditional weights (each set must sum to 1.0) ───────────────────
+//
+// risk-off  Drawdown (ETH Δ7d < −5%): IL and token risk dominate.
+//           Volatility is elevated because out-of-range = zero fees AND IL.
+//           Yield is deprioritised — capital preservation first.
+//
+// neutral   Base case: yield-forward but balanced.
+//
+// risk-on   Bull market (ETH Δ7d > +5%): yield leads, correlation elevated
+//           to prevent over-concentration during aggressive allocation.
+//           IL tolerance increases because fee APY is rising too.
 
-export const WEIGHTS = {
-  yield:       0.25,
-  il:          0.20,
-  liquidity:   0.15,
-  volatility:  0.10,
-  tokenRisk:   0.10,
-  gas:         0.05,
-  correlation: 0.10,
-  regime:      0.05,
-} as const;
+export type WeightSet = Record<
+  "yield" | "il" | "liquidity" | "volatility" | "tokenRisk" | "gas" | "correlation" | "regime",
+  number
+>;
+
+export const WEIGHTS_BY_REGIME = {
+  "risk-off": { yield: 0.10, il: 0.30, liquidity: 0.15, volatility: 0.15, tokenRisk: 0.15, gas: 0.05, correlation: 0.07, regime: 0.03 },
+  "neutral":  { yield: 0.25, il: 0.20, liquidity: 0.15, volatility: 0.10, tokenRisk: 0.10, gas: 0.05, correlation: 0.10, regime: 0.05 },
+  "risk-on":  { yield: 0.35, il: 0.10, liquidity: 0.15, volatility: 0.08, tokenRisk: 0.08, gas: 0.04, correlation: 0.12, regime: 0.08 },
+} as const satisfies Record<string, WeightSet>;
+
+/** Convenience alias kept for any callers that still import WEIGHTS. */
+export const WEIGHTS = WEIGHTS_BY_REGIME["neutral"];
+
+export function weightsForRegime(regime: MacroRegime): WeightSet {
+  return WEIGHTS_BY_REGIME[regime];
+}
 
 const TARGET_POSITIONS = 4;
 
@@ -58,6 +75,9 @@ export interface DecisionScorecard {
 
   /** Weighted composite of the eight scores. */
   composite:   number;
+
+  /** Which weight table was applied ("neutral" until enrichWithPortfolio runs). */
+  weightSet:   "risk-off" | "neutral" | "risk-on";
 
   /** Recommended position size as % of total capital (Kelly × composite). */
   allocationPct: number;
@@ -159,7 +179,8 @@ export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
   const regScore = 75;
   const regLabel = "neutral (pending)";
 
-  const composite    = computeComposite(yieldScore, ilScore, lqScore, volScore, trScore, gasScore, corrScore, regScore);
+  const weights       = WEIGHTS_BY_REGIME["neutral"];
+  const composite     = computeComposite(yieldScore, ilScore, lqScore, volScore, trScore, gasScore, corrScore, regScore, weights);
   const allocationPct = computeAllocation(opp, composite);
 
   return {
@@ -172,6 +193,7 @@ export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
     correlation: corrScore,
     regime:      regScore,
     composite,
+    weightSet:   "neutral",
     allocationPct,
     labels: {
       yield:       yieldLabel,
@@ -239,7 +261,8 @@ export function enrichWithPortfolio(
 
   const regLabel = `${regime}  ${isStable ? "stable" : "volatile"}${highQuality ? " high-quality" : ""}`;
 
-  const composite    = computeComposite(sc.yield, sc.il, sc.liquidity, sc.volatility, sc.tokenRisk, sc.gas, corrScore, regScore);
+  const weights       = weightsForRegime(regime);
+  const composite     = computeComposite(sc.yield, sc.il, sc.liquidity, sc.volatility, sc.tokenRisk, sc.gas, corrScore, regScore, weights);
   const allocationPct = computeAllocation(opp, composite);
 
   return {
@@ -247,6 +270,7 @@ export function enrichWithPortfolio(
     correlation: corrScore,
     regime:      regScore,
     composite,
+    weightSet:   regime,
     allocationPct,
     labels: {
       ...sc.labels,
@@ -265,16 +289,17 @@ function clamp(n: number): number {
 function computeComposite(
   yld: number, il: number, lq: number, vol: number,
   tr: number, gas: number, corr: number, reg: number,
+  w: WeightSet,
 ): number {
   return Math.round(
-    yld  * WEIGHTS.yield      +
-    il   * WEIGHTS.il         +
-    lq   * WEIGHTS.liquidity  +
-    vol  * WEIGHTS.volatility +
-    tr   * WEIGHTS.tokenRisk  +
-    gas  * WEIGHTS.gas        +
-    corr * WEIGHTS.correlation +
-    reg  * WEIGHTS.regime
+    yld  * w.yield      +
+    il   * w.il         +
+    lq   * w.liquidity  +
+    vol  * w.volatility +
+    tr   * w.tokenRisk  +
+    gas  * w.gas        +
+    corr * w.correlation +
+    reg  * w.regime
   );
 }
 

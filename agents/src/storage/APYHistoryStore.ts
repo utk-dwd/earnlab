@@ -64,6 +64,29 @@ export class APYHistoryStore {
       : (rows[mid - 1].apy + rows[mid].apy) / 2;
   }
 
+  /**
+   * Ordered hourly APY series for a pool over the past 7 days.
+   * Used by PortfolioCorrelation to build a pairwise correlation matrix.
+   */
+  getTimeSeries7d(poolId: string): { hourKey: number; apy: number }[] {
+    const cutoff = Math.floor(Date.now() / 3_600_000) - WINDOW_HOURS + 1;
+    return this.db
+      .prepare(
+        "SELECT hour_key AS hourKey, apy FROM apy_snapshots WHERE pool_id = ? AND hour_key >= ? ORDER BY hour_key ASC",
+      )
+      .all(poolId, cutoff) as { hourKey: number; apy: number }[];
+  }
+
+  /** All pool IDs that have at least one snapshot in the 7-day window. */
+  getPoolIds(): string[] {
+    const cutoff = Math.floor(Date.now() / 3_600_000) - WINDOW_HOURS + 1;
+    return (
+      this.db
+        .prepare("SELECT DISTINCT pool_id FROM apy_snapshots WHERE hour_key >= ?")
+        .all(cutoff) as { pool_id: string }[]
+    ).map(r => r.pool_id);
+  }
+
   /** Remove snapshots older than RETAIN_HOURS. */
   prune(): void {
     const cutoff = Math.floor(Date.now() / 3_600_000) - RETAIN_HOURS;

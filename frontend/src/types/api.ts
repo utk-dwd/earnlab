@@ -64,6 +64,7 @@ export interface DecisionScorecard {
   correlation: number;
   regime:      number;
   composite:   number;
+  weightSet:   "risk-off" | "neutral" | "risk-on";
   allocationPct: number;
   labels: {
     yield:       string;
@@ -90,6 +91,8 @@ export interface PortfolioAllocation {
   marginalReturn:   number;
   marginalRisk:     number;
   marginalSharpe:   number;
+  /** Pearson ρ of this pool's APY series with other selected pools. NaN = heuristic used. */
+  correlationWithPortfolio: number;
   reasoning:        string;
 }
 

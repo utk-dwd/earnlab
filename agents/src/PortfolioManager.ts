@@ -18,6 +18,8 @@ import type { RiskBudgetState } from "./calculator/RiskBudget";
 import { enrichWithPortfolio } from "./calculator/DecisionScorecard";
 import { optimizePortfolio } from "./calculator/PortfolioOptimizer";
 import type { OptimizationResult } from "./calculator/PortfolioOptimizer";
+import { buildCorrelationMatrix } from "./calculator/PortfolioCorrelation";
+import type { CorrelationMatrix } from "./calculator/PortfolioCorrelation";
 
 // ─── Regime ───────────────────────────────────────────────────────────────────
 export type MacroRegime = "risk-off" | "neutral" | "risk-on";
@@ -194,11 +196,13 @@ export class PortfolioManager {
 
     // Enrich scorecards with portfolio-aware correlation + regime, then run optimizer
     this.enrichScorecards();
+    const corrMatrix = this.buildCorrMatrix();
     this.latestOptimization = optimizePortfolio(
       this.reporter.getLatest(),
       [...this.positions.values()],
       this.cash,
       this.regime,
+      corrMatrix,
     );
 
     // Evaluate exit triggers every tick — updates alerts for UI and auto-exits when warranted
@@ -409,6 +413,18 @@ export class PortfolioManager {
         opp.scorecard = enrichWithPortfolio(opp.scorecard, opp, positions, this.regime);
       }
     }
+  }
+
+  // ─── APY correlation matrix ──────────────────────────────────────────────
+  // Fetches hourly APY series for every ranked pool from SQLite and builds a
+  // pairwise Pearson correlation matrix.  Pure in-memory computation; cheap.
+  private buildCorrMatrix(): CorrelationMatrix {
+    const store    = this.reporter.getApyHistoryStore();
+    const poolIds  = store.getPoolIds();
+    const seriesMap = new Map(
+      poolIds.map(id => [id, store.getTimeSeries7d(id)] as const),
+    );
+    return buildCorrelationMatrix(seriesMap);
   }
 
   // ─── Kelly-inspired position sizing ─────────────────────────────────────

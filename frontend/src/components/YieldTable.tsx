@@ -879,15 +879,26 @@ function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | u
   if (scorecard == null) {
     return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
   }
-  const { composite, yield: y, il, liquidity, volatility, tokenRisk, gas, correlation, regime, allocationPct, labels } = scorecard;
+  const { composite, yield: y, il, liquidity, volatility, tokenRisk, gas, correlation, regime, allocationPct, weightSet, labels } = scorecard;
   const color = composite >= 80 ? "text-emerald-600 dark:text-emerald-400"
     : composite >= 60            ? "text-green-500 dark:text-green-400"
     : composite >= 40            ? "text-yellow-500 dark:text-yellow-400"
     : "text-red-500 dark:text-red-400";
-  const dim = (name: string, score: number, label: string) =>
-    `  ${name.padEnd(12)} ${String(Math.round(score)).padStart(3)}/100  ${label}`;
+
+  const REGIME_WEIGHTS: Record<string, Record<string, number>> = {
+    "risk-off": { Yield: 0.10, IL: 0.30, Liquidity: 0.15, Volatility: 0.15, "Token Risk": 0.15, Gas: 0.05, Correlation: 0.07, Regime: 0.03 },
+    "neutral":  { Yield: 0.25, IL: 0.20, Liquidity: 0.15, Volatility: 0.10, "Token Risk": 0.10, Gas: 0.05, Correlation: 0.10, Regime: 0.05 },
+    "risk-on":  { Yield: 0.35, IL: 0.10, Liquidity: 0.15, Volatility: 0.08, "Token Risk": 0.08, Gas: 0.04, Correlation: 0.12, Regime: 0.08 },
+  };
+  const activeW = REGIME_WEIGHTS[weightSet ?? "neutral"];
+  const wLabel  = weightSet === "risk-off" ? "🔴 risk-off weights" : weightSet === "risk-on" ? "🟢 risk-on weights" : "⚪ neutral weights";
+
+  const dim = (name: string, score: number, label: string) => {
+    const w = activeW[name];
+    return `  ${name.padEnd(12)} ${String(Math.round(score)).padStart(3)}/100  ×${(w * 100).toFixed(0)}%  ${label}`;
+  };
   const tip = [
-    `Composite: ${composite.toFixed(0)}/100   alloc: ${allocationPct.toFixed(1)}%`,
+    `Composite: ${composite.toFixed(0)}/100   alloc: ${allocationPct.toFixed(1)}%   ${wLabel}`,
     ``,
     dim("Yield",       y,           labels.yield),
     dim("IL",          il,          labels.il),

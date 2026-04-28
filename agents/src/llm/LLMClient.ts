@@ -202,7 +202,7 @@ function buildContext(
       ? `stress=worst${o.stressTest.worstCase.netReturn30dPct.toFixed(1)}%(ES${o.stressTest.expectedShortfall30dPct.toFixed(1)}%)`
       : "stress=?";
     const scorecardLabel = o.scorecard
-      ? `score=${o.scorecard.composite}/100[Y${o.scorecard.yield}|IL${o.scorecard.il}|LQ${o.scorecard.liquidity}|V${o.scorecard.volatility}|TR${o.scorecard.tokenRisk}|G${o.scorecard.gas}|C${o.scorecard.correlation}|R${o.scorecard.regime}] alloc=${o.scorecard.allocationPct.toFixed(0)}%`
+      ? `score=${o.scorecard.composite}/100[${o.scorecard.weightSet}|Y${o.scorecard.yield}|IL${o.scorecard.il}|LQ${o.scorecard.liquidity}|V${o.scorecard.volatility}|TR${o.scorecard.tokenRisk}|G${o.scorecard.gas}|C${o.scorecard.correlation}|R${o.scorecard.regime}] alloc=${o.scorecard.allocationPct.toFixed(0)}%`
       : "score=?";
     return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel} | ${persistLabel} | ${cuLabel}${effPart} | ${trLabel}${srPart} | ${advLabel} | ${stressLabel} | ${scorecardLabel}`;
   }).join("\n") || "  (none yet)";
@@ -301,9 +301,12 @@ function fmtOptimization(summary: PortfolioSummary): string {
   const opt = summary.portfolioOptimization;
   if (!opt || opt.allocations.length === 0) return "";
   const header = `portSharpe=${opt.portfolioSharpe.toFixed(2)} portReturn=${opt.portfolioReturn.toFixed(1)}% portRisk=${opt.portfolioRisk.toFixed(0)}/100 cash=${opt.cashReservedPct.toFixed(0)}%`;
-  const rows = opt.allocations.map(a =>
-    `  rank${a.rank} ${a.pair}@${a.chainName} alloc=${a.allocationPct.toFixed(0)}% score=${a.scorecard.composite}/100 mSharpe=${a.marginalSharpe.toFixed(3)} — ${a.reasoning}`
-  ).join("\n");
+  const rows = opt.allocations.map(a => {
+    const rho = isNaN(a.correlationWithPortfolio)
+      ? "ρ=heuristic"
+      : `ρ=${a.correlationWithPortfolio >= 0 ? "+" : ""}${a.correlationWithPortfolio.toFixed(2)}`;
+    return `  rank${a.rank} ${a.pair}@${a.chainName} alloc=${a.allocationPct.toFixed(0)}% score=${a.scorecard.composite}/100 ${rho} mSharpe=${a.marginalSharpe.toFixed(3)} — ${a.reasoning}`;
+  }).join("\n");
   return `${header}\n${rows}`;
 }
 
@@ -322,9 +325,9 @@ function fmtRiskBudget(summary: PortfolioSummary): string {
 
 function fmtRegime(regime: MacroRegime | undefined): string {
   switch (regime) {
-    case "risk-off": return "RISK-OFF 🔴 (median ETH Δ7d < -5%) — prefer stable pools, sizing halved";
-    case "risk-on":  return "RISK-ON 🟢 (median ETH Δ7d > +5%) — higher IL tolerance, 1.5× Kelly";
-    default:         return "NEUTRAL ⚪ (median ETH Δ7d within ±5%)";
+    case "risk-off": return "RISK-OFF 🔴 (median ETH Δ7d < -5%) — prefer stable pools, sizing halved · scorecard weights: IL=30% yield=10% tokenRisk=15% vol=15%";
+    case "risk-on":  return "RISK-ON 🟢 (median ETH Δ7d > +5%) — higher IL tolerance, 1.5× Kelly · scorecard weights: yield=35% IL=10% correlation=12%";
+    default:         return "NEUTRAL ⚪ (median ETH Δ7d within ±5%) · scorecard weights: yield=25% IL=20% lq=15%";
   }
 }
 

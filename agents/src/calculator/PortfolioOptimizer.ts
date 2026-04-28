@@ -21,6 +21,7 @@
 
 import { enrichWithPortfolio } from "./DecisionScorecard";
 import { checkRiskBudget, rbPairTokens } from "./RiskBudget";
+import { avgCorrelationWith, type CorrelationMatrix } from "./PortfolioCorrelation";
 import { gasBreakEvenDays } from "../config/chains";
 import type { DecisionScorecard } from "./DecisionScorecard";
 import type { RankedOpportunity } from "../ReporterAgent";
@@ -51,6 +52,12 @@ export interface PortfolioAllocation {
   marginalRisk:     number;
   /** marginalReturn / marginalRisk — higher = better portfolio fit. */
   marginalSharpe:   number;
+  /**
+   * Average Pearson correlation of this pool's APY series with other selected
+   * pools. NaN = insufficient history (< 6 shared hourly samples); heuristic
+   * token/chain overlap was used instead.
+   */
+  correlationWithPortfolio: number;
   /** One-sentence explanation of why this rank was assigned. */
   reasoning:        string;
 }
@@ -70,6 +77,7 @@ export function optimizePortfolio(
   positions:    MockPosition[],
   cash:         number,
   regime:       MacroRegime,
+  corrMatrix?:  CorrelationMatrix,
 ): OptimizationResult {
   const openPositions = positions.filter(p => p.status === "open");
   const heldPoolIds   = new Set(openPositions.map(p => p.poolId));
@@ -97,6 +105,7 @@ export function optimizePortfolio(
     let bestSharpe  = -Infinity;
     let bestAlloc   = 0;
     let bestSc: DecisionScorecard | null = null;
+    let bestAvgCorr = NaN;
 
     for (let i = 0; i < eligible.length; i++) {
       const opp = eligible[i];
@@ -111,13 +120,14 @@ export function optimizePortfolio(
       const viols = checkRiskBudget(opp.pair, opp.chainName, value, provPositions, provCash, INITIAL_CAPITAL_USD);
       if (viols.length > 0) continue;
 
-      // Marginal Sharpe
-      const { ms } = marginalSharpe(opp, sc, alloc, provPositions);
+      // Marginal Sharpe (uses real correlation matrix when available)
+      const { ms, avgCorr } = marginalSharpe(opp, sc, alloc, provPositions, corrMatrix);
       if (ms > bestSharpe) {
-        bestSharpe = ms;
-        bestIdx    = i;
-        bestAlloc  = alloc;
-        bestSc     = sc;
+        bestSharpe  = ms;
+        bestIdx     = i;
+        bestAlloc   = alloc;
+        bestSc      = sc;
+        bestAvgCorr = avgCorr;
       }
     }
 
@@ -126,7 +136,7 @@ export function optimizePortfolio(
     const opp     = eligible[bestIdx];
     const sc      = bestSc!;
     const value   = INITIAL_CAPITAL_USD * bestAlloc;
-    const { mr, mk } = marginalSharpe(opp, sc, bestAlloc, provPositions);
+    const { mr, mk } = marginalSharpe(opp, sc, bestAlloc, provPositions, corrMatrix);
 
     const effAPY = opp.effectiveNetAPY > 0 ? opp.effectiveNetAPY : (opp.netAPY > 0 ? opp.netAPY : opp.displayAPY);
 
@@ -140,10 +150,11 @@ export function optimizePortfolio(
       scorecard:       sc,
       allocationPct:   +( bestAlloc * 100).toFixed(1),
       allocationUsd:   +(value).toFixed(0),
-      marginalReturn:  +mr.toFixed(3),
-      marginalRisk:    +mk.toFixed(1),
-      marginalSharpe:  +bestSharpe.toFixed(3),
-      reasoning:       buildReasoning(opp, sc, bestSharpe, provPositions),
+      marginalReturn:           +mr.toFixed(3),
+      marginalRisk:             +mk.toFixed(1),
+      marginalSharpe:           +bestSharpe.toFixed(3),
+      correlationWithPortfolio: isNaN(bestAvgCorr) ? NaN : +bestAvgCorr.toFixed(3),
+      reasoning:                buildReasoning(opp, sc, bestSharpe, bestAvgCorr, provPositions),
     });
 
     selected.push(opp);
@@ -174,45 +185,84 @@ export function optimizePortfolio(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Compute marginal return, risk, and Sharpe for adding this pool. */
+/**
+ * Marginal return, risk, and Sharpe for adding this pool to the portfolio.
+ *
+ * corrMult derivation:
+ *   avgCorr = real Pearson ρ from APY history (or heuristic if data < 6 pts)
+ *   corrMult = clamp(1 + avgCorr × 0.8, 0.2, 1.8)
+ *
+ *   ρ = +1  → corrMult = 1.8  (perfectly in-sync; adds concentrated risk)
+ *   ρ =  0  → corrMult = 1.0  (uncorrelated; neutral)
+ *   ρ = -1  → corrMult = 0.2  (counter-cyclical; genuine diversification)
+ */
 function marginalSharpe(
-  opp:      RankedOpportunity,
-  sc:       DecisionScorecard,
-  alloc:    number,
-  existing: MockPosition[],
-): { ms: number; mr: number; mk: number } {
+  opp:       RankedOpportunity,
+  sc:        DecisionScorecard,
+  alloc:     number,
+  existing:  MockPosition[],
+  corrMatrix?: CorrelationMatrix,
+): { ms: number; mr: number; mk: number; avgCorr: number } {
   const effAPY = opp.effectiveNetAPY > 0 ? opp.effectiveNetAPY
                : opp.netAPY         > 0 ? opp.netAPY
                : opp.displayAPY;
 
-  const mr = alloc * effAPY;  // marginal return: allocation × yield
-  // Standalone pool risk = (1 − composite/100)
+  const mr           = alloc * effAPY;
   const poolRiskFrac = Math.max(0.01, 1 - sc.composite / 100);
 
-  // Correlation multiplier: existing positions with shared tokens/chain amplify risk
-  const [t0, t1]   = rbPairTokens(opp.pair);
-  const heldTokens = new Set(existing.flatMap(p => rbPairTokens(p.pair) as string[]));
-  const heldChains = existing.map(p => p.chainName);
-  const tokenOverlap = ([t0, t1].filter(t => heldTokens.has(t)).length / 2);
-  const chainDupFrac = heldChains.filter(c => c === opp.chainName).length / Math.max(existing.length, 1);
-  const corrMult = 1 + tokenOverlap * 0.5 + chainDupFrac * 0.3;
+  // ── Correlation multiplier ─────────────────────────────────────────────────
+  // Prefer real Pearson ρ from APY history; fall back to token/chain heuristic.
+  const existingIds  = existing.map(p => p.poolId);
+  let avgCorr: number;
 
-  const mk = alloc * poolRiskFrac * 100 * corrMult;  // marginal risk (0–100 scale)
+  if (corrMatrix && existing.length > 0) {
+    const realCorr = avgCorrelationWith(opp.poolId, existingIds, corrMatrix);
+    if (!isNaN(realCorr)) {
+      avgCorr = realCorr;
+    } else {
+      // Insufficient shared history — derive heuristic ρ from structural overlap
+      const [t0, t1]   = rbPairTokens(opp.pair);
+      const heldTokens = new Set(existing.flatMap(p => rbPairTokens(p.pair) as string[]));
+      const heldChains = existing.map(p => p.chainName);
+      const tokenFrac  = [t0, t1].filter(t => heldTokens.has(t)).length / 2;
+      const chainFrac  = heldChains.filter(c => c === opp.chainName).length / Math.max(existing.length, 1);
+      avgCorr = tokenFrac * 0.5 + chainFrac * 0.3;
+    }
+  } else if (existing.length > 0) {
+    // No matrix available — use heuristic
+    const [t0, t1]   = rbPairTokens(opp.pair);
+    const heldTokens = new Set(existing.flatMap(p => rbPairTokens(p.pair) as string[]));
+    const heldChains = existing.map(p => p.chainName);
+    const tokenFrac  = [t0, t1].filter(t => heldTokens.has(t)).length / 2;
+    const chainFrac  = heldChains.filter(c => c === opp.chainName).length / Math.max(existing.length, 1);
+    avgCorr = tokenFrac * 0.5 + chainFrac * 0.3;
+  } else {
+    avgCorr = 0;  // empty portfolio — no correlation penalty
+  }
+
+  // corrMult: ρ=-1 → 0.2, ρ=0 → 1.0, ρ=+1 → 1.8
+  const corrMult = Math.max(0.2, Math.min(1.8, 1 + avgCorr * 0.8));
+
+  const mk = alloc * poolRiskFrac * 100 * corrMult;
   const ms = mk > 0 ? mr / mk : mr * 100;
 
-  return { ms, mr, mk };
+  return { ms, mr, mk, avgCorr };
 }
 
 function buildReasoning(
   opp:      RankedOpportunity,
   sc:       DecisionScorecard,
   mSharpe:  number,
+  avgCorr:  number,
   existing: MockPosition[],
 ): string {
-  const effAPY = opp.effectiveNetAPY > 0 ? opp.effectiveNetAPY : opp.netAPY;
-  const corr   = sc.correlation >= 80 ? "high diversification" : sc.correlation >= 50 ? "moderate overlap" : "correlated with holdings";
-  const regime = sc.regime >= 70 ? "regime-aligned" : sc.regime >= 40 ? "neutral regime fit" : "regime headwind";
-  return `effAPY ${effAPY.toFixed(1)}%, composite ${sc.composite}/100, ${corr}, ${regime} — marginalSharpe ${mSharpe.toFixed(3)}`;
+  const effAPY  = opp.effectiveNetAPY > 0 ? opp.effectiveNetAPY : opp.netAPY;
+  const corrSrc = isNaN(avgCorr) ? "heuristic" : "APY-series";
+  const corrStr = isNaN(avgCorr)
+    ? (sc.correlation >= 80 ? "high diversification" : sc.correlation >= 50 ? "moderate overlap" : "correlated")
+    : `ρ=${avgCorr >= 0 ? "+" : ""}${avgCorr.toFixed(2)} (${corrSrc})`;
+  const regime  = sc.regime >= 70 ? "regime-aligned" : sc.regime >= 40 ? "neutral fit" : "regime headwind";
+  return `effAPY ${effAPY.toFixed(1)}%, composite ${sc.composite}/100, ${corrStr}, ${regime} — mSharpe ${mSharpe.toFixed(3)}`;
 }
 
 /** Synthetic minimal MockPosition so the optimizer can track provisional holdings. */
@@ -250,7 +300,7 @@ function fallbackScorecard(opp: RankedOpportunity): DecisionScorecard {
   return {
     yield: Math.min(100, effAPY / 50 * 100), il: 50, liquidity: opp.liquidityQuality || 50,
     volatility: 50, tokenRisk: 50, gas: 50, correlation: 50, regime: 75,
-    composite: comp, allocationPct: Math.min(30, comp * 0.25),
+    composite: comp, weightSet: "neutral", allocationPct: Math.min(30, comp * 0.25),
     labels: { yield: `effAPY=${effAPY.toFixed(1)}%`, il: "n/a", liquidity: `lq=${opp.liquidityQuality}`,
       volatility: "n/a", tokenRisk: "n/a", gas: "n/a", correlation: "pending", regime: "pending" },
   };
