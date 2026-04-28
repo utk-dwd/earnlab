@@ -163,9 +163,10 @@ function buildContext(
 
   const posLines = positions.length > 0
     ? positions.map(p => {
+        const range  = p.halfRangePct > 0 ? ` range=±${p.halfRangePct.toFixed(1)}%` : "";
         const tir    = p.timeInRangePct != null ? ` TiR=${p.timeInRangePct.toFixed(0)}%` : "";
         const alerts = p.exitAlerts?.length ? ` ⚠ ${p.exitAlerts.join("; ")}` : "";
-        return `  ${p.poolId} | ${p.pair} | ${p.chainName} | invested=$${p.entryValueUsd.toFixed(0)} | entryAPY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}${tir}${alerts}`;
+        return `  ${p.poolId} | ${p.pair} | ${p.chainName} | invested=$${p.entryValueUsd.toFixed(0)} | entryAPY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}${range}${tir}${alerts}`;
       }).join("\n")
     : "  (none — portfolio is empty)";
 
@@ -289,6 +290,7 @@ function buildCritiqueContext(
     `  Net APY:        ${net}`,
     `  Expected IL:    ${il}`,
     `  RAR-7d:         ${opp.rar7d > 0 ? opp.rar7d.toFixed(2) : "n/a (data missing)"}`,
+    `  Tick range:     ±${(opp.vol7d > 0 ? opp.vol7d * 2 : 5).toFixed(1)}% (2σ of vol7d=${opp.vol7d > 0 ? opp.vol7d.toFixed(1) : "unknown"}%)`,
     `  TVL:            ${fmtUsd(opp.tvlUsd)}`,
     `  24h volume:     ${fmtUsd(opp.volume24hUsd)}`,
     `  Token0 Δ7d:     ${(opp.token0PriceChange7d * 100).toFixed(1)}%`,

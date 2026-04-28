@@ -2,6 +2,8 @@ import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
+import { TICK_SPACINGS } from "./config/chains";
+import type { FeeTier } from "./config/chains";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INITIAL_CAPITAL_USD = 10_000;
@@ -50,7 +52,13 @@ export interface MockPosition {
   closedTimestamp?: number;
   closedValueUsd?:  number;
   closeReason?:     string;
-  /** 0–100. Estimated % of time price was within tick range (proxy: decreases with pair price divergence). */
+  /** Lower tick of the 2σ concentrated range (entry-relative, negative). */
+  tickLower:       number;
+  /** Upper tick of the 2σ concentrated range (entry-relative, positive). */
+  tickUpper:       number;
+  /** Half-width of the range in % (vol7d × 2). Used for TiR calculation. */
+  halfRangePct:    number;
+  /** 0–100. Estimated % of time price was within tick range. */
   timeInRangePct:  number;
   /** Active exit trigger descriptions. Updated every tick; empty = healthy. */
   exitAlerts:      string[];
@@ -412,13 +420,16 @@ export class PortfolioManager {
 
     for (const pos of open) {
       const opp        = allOpps.find(o => o.poolId === pos.poolId);
-      const currentRAR = opp?.rar7d     ?? 0;
-      const currentNet = opp?.netAPY    ?? pos.entryAPY;
-      const pairMove   = Math.abs(opp?.pairPriceChange7d ?? 0) * 100; // %
+      const currentRAR  = opp?.rar7d  ?? 0;
+      const currentNet  = opp?.netAPY ?? pos.entryAPY;
+      const pairMovePct = Math.abs((opp?.pairPriceChange7d ?? 0) * 100);
 
-      // Time-in-range proxy: 100% at <5% price move, drops ~4%/pct-move beyond that
-      // Represents a ±10% tick range — drifts out as price diverges
-      pos.timeInRangePct = Math.max(0, Math.min(100, 100 - Math.max(0, pairMove - 5) * 4));
+      // TiR based on actual 2σ tick range stored at entry.
+      // rangeFraction: 0 = at center, 1 = at range boundary, 2 = 2× out of range.
+      // Linear decay: 100% at center → 50% at boundary → 0% at 2× outside.
+      const halfRange = pos.halfRangePct > 0 ? pos.halfRangePct : 5;
+      const rangeFraction = pairMovePct / halfRange;
+      pos.timeInRangePct = Math.max(0, Math.min(100, Math.round((1 - rangeFraction / 2) * 100)));
 
       const heldH  = pos.hoursHeld;
       const alerts: string[] = [];
@@ -436,7 +447,7 @@ export class PortfolioManager {
       }
 
       // 3. Significant price move (IL accelerates)
-      if (opp && pairMove > PRICE_MOVE_THRESHOLD_PCT) {
+      if (opp && pairMovePct > PRICE_MOVE_THRESHOLD_PCT) {
         const dir = (opp.pairPriceChange7d > 0 ? "+" : "") + (opp.pairPriceChange7d * 100).toFixed(1);
         alerts.push(`Price move ${dir}% in 7d — IL risk (threshold ±${PRICE_MOVE_THRESHOLD_PCT}%)`);
       }
@@ -466,8 +477,10 @@ export class PortfolioManager {
   // ─── Simulated LP value accrual ──────────────────────────────────────────
   private updateValues(): void {
     for (const pos of this.openList()) {
-      const yrs           = (Date.now() - pos.entryTimestamp) / (365 * 24 * 3_600_000);
-      pos.earnedFeesUsd   = pos.entryValueUsd * (pos.entryAPY / 100) * yrs;
+      const yrs = (Date.now() - pos.entryTimestamp) / (365 * 24 * 3_600_000);
+      // Concentrated LP earns fees only while in range — scale by TiR fraction
+      const tirFraction   = pos.timeInRangePct / 100;
+      pos.earnedFeesUsd   = pos.entryValueUsd * (pos.entryAPY / 100) * yrs * tirFraction;
       pos.currentValueUsd = pos.entryValueUsd + pos.earnedFeesUsd;
       pos.pnlUsd          = pos.currentValueUsd - pos.entryValueUsd;
       pos.pnlPct          = (pos.pnlUsd / pos.entryValueUsd) * 100;
@@ -481,6 +494,8 @@ export class PortfolioManager {
     const invested = spend - fee;
     this.cash     -= spend;
     this.feesPaid += fee;
+
+    const { tickLower, tickUpper, halfRangePct } = computeTickRange(opp);
 
     const pos: MockPosition = {
       id:              nextId(),
@@ -500,6 +515,9 @@ export class PortfolioManager {
       pnlPct:          0,
       hoursHeld:       0,
       status:          "open",
+      tickLower,
+      tickUpper,
+      halfRangePct,
       timeInRangePct:  100,
       exitAlerts:      [],
     };
@@ -592,6 +610,26 @@ export class PortfolioManager {
   getDecisionHistory(limit = 20): DecisionCycle[] {
     return this.decisionHistory.slice(0, limit);
   }
+}
+
+// ─── Tick range calculator ────────────────────────────────────────────────────
+// Uniswap v4: price = 1.0001^tick  →  tickDelta = ln(1 + pct/100) / ln(1.0001)
+// Range = ±2σ (vol7d × 2%) — covers ~95% of 7-day price movement.
+// Snapped outward to the pool's tick spacing so the range is always valid.
+
+const LN_1_0001 = Math.log(1.0001); // ≈ 9.9995e-5
+
+function computeTickRange(opp: RankedOpportunity): {
+  tickLower:    number;
+  tickUpper:    number;
+  halfRangePct: number;
+} {
+  const vol          = opp.vol7d > 0 ? opp.vol7d : 5;     // default 5% if vol unknown
+  const halfRangePct = vol * 2;                             // 2σ in %
+  const rawHalfTicks = Math.log(1 + halfRangePct / 100) / LN_1_0001;
+  const spacing      = TICK_SPACINGS[opp.feeTier as FeeTier] ?? 60;
+  const halfTicks    = Math.ceil(rawHalfTicks / spacing) * spacing;  // snap outward
+  return { tickLower: -halfTicks, tickUpper: halfTicks, halfRangePct };
 }
 
 // Prefer RAR-7d when both sides have it; otherwise rank by net APY (fee APY − expected IL)

@@ -80,7 +80,7 @@ function StatusBadge({ status, alertCount }: { status: "open" | "closed"; alertC
   );
 }
 
-function TimeInRangeBar({ pct }: { pct: number }) {
+function TimeInRangeBar({ pct, halfRangePct }: { pct: number; halfRangePct?: number }) {
   const color = pct >= 80 ? "bg-green-500" : pct >= 50 ? "bg-amber-400" : "bg-red-500";
   return (
     <div className="flex items-center gap-1 mt-1">
@@ -88,6 +88,9 @@ function TimeInRangeBar({ pct }: { pct: number }) {
         <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-xs tabular-nums text-gray-400">{pct.toFixed(0)}%</span>
+      {halfRangePct != null && halfRangePct > 0 && (
+        <span className="text-xs text-gray-300 dark:text-gray-600">±{halfRangePct.toFixed(1)}%</span>
+      )}
     </div>
   );
 }
@@ -270,7 +273,7 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                     <td className="px-3 py-3">
                       <StatusBadge status={pos.status} alertCount={alertCount} />
                       {pos.status === "open" && pos.timeInRangePct != null && (
-                        <TimeInRangeBar pct={pos.timeInRangePct} />
+                        <TimeInRangeBar pct={pos.timeInRangePct} halfRangePct={pos.halfRangePct} />
                       )}
                     </td>
 
@@ -376,7 +379,7 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
             <span className="text-orange-500 font-semibold"> D</span> &gt;0
             <span className="text-red-500    font-semibold"> F</span> none
           </span>
-          <span><strong>TiR bar</strong> = estimated time-in-range (proxy: pair price divergence from entry)</span>
+          <span><strong>TiR bar</strong> = estimated time-in-range vs ±2σ tick range (±% label = vol7d × 2)</span>
           <span><strong>⚠ alerts</strong> — RAR drop &gt;50%, better opp &gt;1.5×, price move &gt;15%, TiR &lt;80%, stale &lt;5% netAPY after 30d</span>
         </div>
       </div>

@@ -107,6 +107,9 @@ export interface MockPosition {
   closedTimestamp?: number;
   closedValueUsd?:  number;
   closeReason?:     string;
+  tickLower:       number;
+  tickUpper:       number;
+  halfRangePct:    number;
   timeInRangePct:  number;
   exitAlerts:      string[];
 }
