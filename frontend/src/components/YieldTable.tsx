@@ -315,7 +315,7 @@ function RARCell({ rar, vol, quality, window: win }: {
 }
 
 function NetAPYCell({ feeAPY, expectedIL, netAPY }: { feeAPY: number; expectedIL: number; netAPY: number }) {
-  if (expectedIL === 0) {
+  if (!Number.isFinite(netAPY) || !Number.isFinite(expectedIL) || expectedIL === 0) {
     return <span className="text-gray-300 dark:text-gray-600 text-xs">—</span>;
   }
   const tooltip = `Net APY = ${netAPY.toFixed(2)}%\nFee APY = ${feeAPY.toFixed(2)}%\nExpected IL = ${expectedIL.toFixed(2)}%`;
