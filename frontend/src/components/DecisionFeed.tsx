@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { DecisionCycle, AgentDecision } from "../types/api";
+import type { DecisionCycle, AgentDecision, CritiqueResult } from "../types/api";
 
 interface Props {
   apiUrl: string;
@@ -37,14 +37,43 @@ function ConfidenceBar({ value }: { value: number }) {
   );
 }
 
-function DecisionCard({ d, executed }: { d: AgentDecision; executed: boolean }) {
+function CritiquePanel({ critique, action }: { critique: CritiqueResult; action: AgentDecision["action"] }) {
+  const vetoed = critique.veto && critique.confidence >= 0.75;
   return (
-    <div className={`rounded-lg px-2.5 py-2 border ${executed ? "border-transparent bg-gray-50 dark:bg-gray-800/60" : "border-dashed border-gray-200 dark:border-gray-700 opacity-60"}`}>
+    <div className={`mt-2 rounded px-2 py-1.5 border-l-2 text-xs ${
+      vetoed
+        ? "border-red-400   bg-red-50   dark:bg-red-900/20   text-red-700   dark:text-red-400"
+        : "border-green-400 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400"
+    }`}>
+      <div className="flex items-center gap-1.5 mb-0.5 font-semibold">
+        <span>{vetoed ? "✗ Critic vetoed" : "✓ Critic approved"}</span>
+        <span className="font-normal text-gray-400 dark:text-gray-500">
+          {(critique.confidence * 100).toFixed(0)}% conf
+        </span>
+      </div>
+      <p className="leading-relaxed">{critique.reasoning}</p>
+    </div>
+  );
+}
+
+function DecisionCard({ d, executed }: { d: AgentDecision; executed: boolean }) {
+  const vetoed = d.critique?.veto && (d.critique.confidence ?? 0) >= 0.75;
+  return (
+    <div className={`rounded-lg px-2.5 py-2 border ${
+      vetoed
+        ? "border-red-200 dark:border-red-900/60 bg-red-50/50 dark:bg-red-900/10"
+        : executed
+        ? "border-transparent bg-gray-50 dark:bg-gray-800/60"
+        : "border-dashed border-gray-200 dark:border-gray-700 opacity-60"
+    }`}>
       <div className="flex items-center gap-2 mb-1.5">
         <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${ACTION_STYLES[d.action]}`}>
           {d.action}
         </span>
-        {!executed && (
+        {vetoed && (
+          <span className="text-xs text-red-500 dark:text-red-400 font-medium">critic veto</span>
+        )}
+        {!vetoed && !executed && (
           <span className="text-xs text-gray-400 dark:text-gray-500">skipped</span>
         )}
         {d.pool && (
@@ -61,6 +90,9 @@ function DecisionCard({ d, executed }: { d: AgentDecision; executed: boolean }) 
         <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 italic">
           Exit if: {d.exitCondition}
         </p>
+      )}
+      {d.critique && (
+        <CritiquePanel critique={d.critique} action={d.action} />
       )}
     </div>
   );
@@ -87,6 +119,9 @@ function CycleCard({ cycle }: { cycle: DecisionCycle }) {
             <span className={`text-xs font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${ACTION_STYLES[primary.action]}`}>
               {primary.action}
             </span>
+          )}
+          {primary?.critique?.veto && (primary.critique.confidence ?? 0) >= 0.75 && (
+            <span className="text-xs text-red-500 dark:text-red-400 font-medium shrink-0">vetoed</span>
           )}
           <p className="text-xs text-gray-600 dark:text-gray-400 truncate flex-1">
             {cycle.reasoning || primary?.reasoning || "—"}
@@ -180,7 +215,7 @@ export function DecisionFeed({ apiUrl }: Props) {
 
       <div className="flex-shrink-0 pt-2 border-t border-gray-200 dark:border-gray-700 mt-2">
         <p className="text-xs text-gray-400 dark:text-gray-600">
-          Every 5 min · confidence ≥ 75% executes · DeepSeek V3
+          Every 5 min · Seeker → Critic → Executor · DeepSeek V3
         </p>
       </div>
     </aside>

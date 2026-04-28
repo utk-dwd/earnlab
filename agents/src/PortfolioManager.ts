@@ -1,7 +1,7 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
-import type { AgentDecision, DecisionCycle } from "./llm/LLMClient";
+import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INITIAL_CAPITAL_USD = 10_000;
@@ -184,7 +184,7 @@ export class PortfolioManager {
           continue;
         }
         console.log(`[Portfolio] Execute: ${tag} — ${d.reasoning}`);
-        this.executeDecision(d);
+        await this.executeDecision(d);
       }
 
       // Persist primary (non-hold) decision to 0G memory
@@ -207,24 +207,44 @@ export class PortfolioManager {
     }
   }
 
-  private executeDecision(d: AgentDecision): void {
+  private async executeDecision(d: AgentDecision): Promise<void> {
     switch (d.action) {
-      case "enter":
-        if (d.pool) this.toolOpen(d.pool, d.reasoning, d.allocationPct);
+      case "enter": {
+        if (!d.pool) break;
+        const opp = this.reporter.getLatest().find(o => o.poolId === d.pool);
+        if (opp && this.llm) {
+          const critique = await this.llm.critique(d, opp, this.getSummary(), this.openList());
+          d.critique = critique;
+          if (critique.veto && critique.confidence >= CONFIDENCE_THRESHOLD) {
+            console.log(`[Portfolio] Critic VETOED ${opp.pair}: ${critique.reasoning}`);
+            break;
+          }
+          console.log(`[Portfolio] Critic approved ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%): ${critique.reasoning}`);
+        }
+        this.toolOpen(d.pool, d.reasoning, d.allocationPct);
         break;
+      }
 
       case "exit":
         if (d.pool) this.toolClose(d.pool, d.reasoning);
         break;
 
       case "rebalance": {
-        // Close weakest current position, then enter the target pool
-        const worst = this.openList()
-          .sort((a, b) => a.pnlPct - b.pnlPct)[0];
-        if (worst) {
-          this.toolClose(worst.poolId, `Rebalancing into ${d.pool}: ${d.reasoning}`);
+        const worst = this.openList().sort((a, b) => a.pnlPct - b.pnlPct)[0];
+        if (d.pool) {
+          const opp = this.reporter.getLatest().find(o => o.poolId === d.pool);
+          if (opp && this.llm) {
+            const critique = await this.llm.critique(d, opp, this.getSummary(), this.openList());
+            d.critique = critique;
+            if (critique.veto && critique.confidence >= CONFIDENCE_THRESHOLD) {
+              console.log(`[Portfolio] Critic VETOED rebalance into ${opp.pair}: ${critique.reasoning}`);
+              break;  // skip both close and open — don't unwind a good position for a vetoed target
+            }
+            console.log(`[Portfolio] Critic approved rebalance into ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%)`);
+          }
+          if (worst) this.toolClose(worst.poolId, `Rebalancing into ${d.pool}: ${d.reasoning}`);
+          this.toolOpen(d.pool, d.reasoning, d.allocationPct);
         }
-        if (d.pool) this.toolOpen(d.pool, d.reasoning, d.allocationPct);
         break;
       }
 

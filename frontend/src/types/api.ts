@@ -126,6 +126,12 @@ export interface PortfolioTrade {
   reason:       string;
 }
 
+export interface CritiqueResult {
+  veto:       boolean;
+  confidence: number;
+  reasoning:  string;
+}
+
 export interface AgentDecision {
   action:         "enter" | "exit" | "rebalance" | "hold" | "wait";
   pool?:          string;
@@ -133,6 +139,7 @@ export interface AgentDecision {
   confidence:     number;
   reasoning:      string;
   exitCondition?: string;
+  critique?:      CritiqueResult;
 }
 
 export interface DecisionCycle {

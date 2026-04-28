@@ -16,6 +16,12 @@ const CONTEXT_LIMIT = 8;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
+export interface CritiqueResult {
+  veto:       boolean;
+  confidence: number;
+  reasoning:  string;
+}
+
 export interface AgentDecision {
   action:         "enter" | "exit" | "rebalance" | "hold" | "wait";
   pool?:          string;   // poolId from opportunities list
@@ -23,6 +29,7 @@ export interface AgentDecision {
   confidence:     number;   // 0–1
   reasoning:      string;
   exitCondition?: string;   // forward-looking exit trigger
+  critique?:      CritiqueResult;  // Critic's verdict (enter/rebalance only)
 }
 
 export interface DecisionCycle {
@@ -113,6 +120,30 @@ export class LLMClient {
     const tokens = response.usage?.total_tokens ?? 0;
 
     return { ...parseCycle(raw), timestamp: ts, rawTokens: tokens };
+  }
+
+  async critique(
+    decision:  AgentDecision,
+    opp:       RankedOpportunity,
+    summary:   PortfolioSummary,
+    positions: MockPosition[],
+  ): Promise<CritiqueResult> {
+    try {
+      const context  = buildCritiqueContext(decision, opp, summary, positions);
+      const response = await this.client.chat.completions.create({
+        model:           MODEL,
+        messages: [
+          { role: "system", content: CRITIC_PROMPT },
+          { role: "user",   content: context },
+        ],
+        response_format: { type: "json_object" },
+        max_tokens:      250,
+      });
+      return parseCritique(response.choices[0]?.message?.content ?? "{}");
+    } catch {
+      // If Critic fails, approve by default — don't let it block execution
+      return { veto: false, confidence: 0, reasoning: "Critic unavailable — defaulting to approve" };
+    }
   }
 }
 
@@ -205,4 +236,83 @@ function fmtHours(h: number): string {
   if (h < 1)  return `${Math.round(h * 60)}m`;
   if (h < 24) return `${h.toFixed(1)}h`;
   return `${(h / 24).toFixed(1)}d`;
+}
+
+// ─── Critic prompt ────────────────────────────────────────────────────────────
+
+const CRITIC_PROMPT = `You are EarnYld's adversarial risk critic. Your sole job is to find every reason NOT to enter a proposed LP position.
+
+You receive a Seeker's proposed entry and the pool's market data. Be skeptical, not balanced.
+
+Return ONLY valid JSON — no markdown, no extra keys:
+{
+  "veto":       true | false,
+  "confidence": <0.0–1.0>,
+  "reasoning":  "<1–3 sentences — specific risks that justify your verdict>"
+}
+
+Challenge every proposed entry. Look hard for:
+- IL destruction: volatile pairs where expectedIL eats most of the fee APY
+- Weak RAR: RAR-7d ≤ 2.0 is mediocre — is this really worth the IL exposure?
+- Price momentum risk: if the pair moved >5% in 7d, the position may already be out of range
+- TVL red flags: low TVL means thin liquidity, high slippage, and rug exposure
+- APY mirage: unsustainably high APY driven by one-off volume spikes — will it revert?
+- Overconcentration: does the portfolio already hold similar token exposure?
+- Stale data: if RAR is n/a, you have incomplete information — is that acceptable?
+- Opportunity cost: is this meaningfully better than cash given the risks?
+
+Set veto=true and confidence high when you find real risks. Only set veto=false when the opportunity is genuinely compelling AND risks are manageable.`;
+
+// ─── Critic context builder ───────────────────────────────────────────────────
+
+function buildCritiqueContext(
+  decision:  AgentDecision,
+  opp:       RankedOpportunity,
+  summary:   PortfolioSummary,
+  positions: MockPosition[],
+): string {
+  const il    = opp.expectedIL > 0 ? `${opp.expectedIL.toFixed(1)}%` : "n/a";
+  const net   = opp.expectedIL > 0 ? `${opp.netAPY.toFixed(1)}% (after IL)` : `${opp.displayAPY.toFixed(1)}% (IL unquantified)`;
+  const alloc = decision.allocationPct != null ? `${decision.allocationPct.toFixed(1)}%` : "Kelly-sized";
+  const posLines = positions.length > 0
+    ? positions.map(p => `  ${p.pair} | ${p.chainName} | APY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}`).join("\n")
+    : "  (none)";
+
+  return [
+    `SEEKER PROPOSES: ${decision.action.toUpperCase()} ${opp.pair} on ${opp.chainName}`,
+    `Seeker reasoning: ${decision.reasoning}`,
+    ``,
+    `POOL DATA:`,
+    `  Pair:           ${opp.pair} (${opp.feeTierLabel})`,
+    `  Chain:          ${opp.chainName}  Risk tier: ${opp.risk}`,
+    `  Fee APY:        ${opp.displayAPY.toFixed(1)}%`,
+    `  Net APY:        ${net}`,
+    `  Expected IL:    ${il}`,
+    `  RAR-7d:         ${opp.rar7d > 0 ? opp.rar7d.toFixed(2) : "n/a (data missing)"}`,
+    `  TVL:            ${fmtUsd(opp.tvlUsd)}`,
+    `  24h volume:     ${fmtUsd(opp.volume24hUsd)}`,
+    `  Token0 Δ7d:     ${(opp.token0PriceChange7d * 100).toFixed(1)}%`,
+    `  Token1 Δ7d:     ${(opp.token1PriceChange7d * 100).toFixed(1)}%`,
+    `  Pair price Δ7d: ${(opp.pairPriceChange7d * 100).toFixed(1)}%`,
+    `  Allocation:     ${alloc} of $${summary.totalCapitalUsd} total capital`,
+    ``,
+    `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
+    `OPEN POSITIONS:`,
+    posLines,
+  ].join("\n");
+}
+
+// ─── Critique parser ──────────────────────────────────────────────────────────
+
+function parseCritique(raw: string): CritiqueResult {
+  try {
+    const p = JSON.parse(raw);
+    return {
+      veto:       Boolean(p.veto),
+      confidence: Math.max(0, Math.min(1, Number(p.confidence ?? 0))),
+      reasoning:  String(p.reasoning ?? ""),
+    };
+  } catch {
+    return { veto: false, confidence: 0, reasoning: "Critic parse error — defaulting to approve" };
+  }
 }
