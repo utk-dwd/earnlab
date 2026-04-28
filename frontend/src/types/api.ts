@@ -168,6 +168,7 @@ export interface PortfolioSummary {
   llmEnabled:             boolean;
   lastDecision:           AgentDecision | null;
   lastDecisionAt:         number | null;
+  tokenExposure:          Record<string, number>;
 }
 
 export interface YieldsResponse          { count: number; data: RankedOpportunity[] }

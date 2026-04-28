@@ -16,8 +16,9 @@ const MAX_BREAKEVEN_DAYS  = 7;      // only rebalance if fee recovers within thi
 const ENTRY_FEE_PCT        = 0.001;  // 0.1% simulated swap cost to enter
 const EXIT_FEE_PCT         = 0.001;  // 0.1% simulated swap cost to exit
 const CHECK_INTERVAL_MS    = 5 * 60_000;
-const CONFIDENCE_THRESHOLD = 0.75;
-const DECISION_HISTORY_MAX = 50;
+const CONFIDENCE_THRESHOLD    = 0.75;
+const DECISION_HISTORY_MAX    = 50;
+const MAX_TOKEN_EXPOSURE_PCT  = 0.40;  // max 40% of capital in any single underlying token
 
 // ─── Exit trigger thresholds ─────────────────────────────────────────────────
 const RAR_DETERIORATION_RATIO  = 0.50;  // exit if current RAR7d < entry × 0.5
@@ -96,6 +97,7 @@ export interface PortfolioSummary {
   llmEnabled:             boolean;
   lastDecision:           AgentDecision | null;
   lastDecisionAt:         number | null;
+  tokenExposure:          Record<string, number>;  // normalised token → % of totalCapital
 }
 
 export type { AgentDecision, DecisionCycle };
@@ -292,6 +294,13 @@ export class PortfolioManager {
       ? Math.min(allocationPct / 100, MAX_POSITION_PCT)
       : this.kellyAllocation(opp);
 
+    // Correlation guard: block if any token would exceed 40% of total capital
+    const guard = correlationGuardCheck(opp.pair, INITIAL_CAPITAL_USD * pct, this.openList());
+    if (!guard.ok) {
+      console.log(`[Portfolio] Correlation guard blocked ${opp.pair}: ${guard.blockedToken} ${guard.currentPct?.toFixed(1)}% + ${guard.addedPct?.toFixed(1)}% = ${guard.newPct?.toFixed(1)}% > ${(MAX_TOKEN_EXPOSURE_PCT * 100).toFixed(0)}%`);
+      return false;
+    }
+
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason, agentDecision);
     this.lastRebalance = Date.now();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
@@ -333,19 +342,46 @@ export class PortfolioManager {
       return;
     }
 
-    const n   = Math.min(candidates.length, TARGET_POSITIONS);
-    const top = candidates.slice(0, n);
+    // Greedy selection: iterate ranked candidates, skip any that would breach correlation limit
+    const selected:   RankedOpportunity[] = [];
+    const hypExposure = new Map<string, number>();  // provisional token → USD
 
-    // Compute raw Kelly allocations then normalize so they sum to ≤ 1
-    const rawFracs = top.map(c => this.kellyAllocation(c));
+    for (const c of candidates) {
+      if (selected.length >= TARGET_POSITIONS) break;
+      const valueUsd = INITIAL_CAPITAL_USD * this.kellyAllocation(c);
+      const tokens   = extractTokens(c.pair);
+
+      const blocked = tokens.find(t => {
+        const cur = hypExposure.get(t) ?? 0;
+        return (cur + valueUsd / 2) / INITIAL_CAPITAL_USD > MAX_TOKEN_EXPOSURE_PCT;
+      });
+      if (blocked) {
+        const curPct = ((hypExposure.get(blocked) ?? 0) / INITIAL_CAPITAL_USD * 100).toFixed(1);
+        console.log(`[Portfolio] Deploy: skip ${c.pair} — ${blocked} already at ${curPct}% (correlation limit)`);
+        continue;
+      }
+
+      selected.push(c);
+      for (const t of tokens) {
+        hypExposure.set(t, (hypExposure.get(t) ?? 0) + valueUsd / 2);
+      }
+    }
+
+    if (selected.length === 0) {
+      console.log("[Portfolio] No deployable candidates after correlation guard — will retry");
+      return;
+    }
+
+    // Normalize Kelly fractions so total allocation ≤ 100%
+    const rawFracs = selected.map(c => this.kellyAllocation(c));
     const rawSum   = rawFracs.reduce((a, b) => a + b, 0);
     const scale    = rawSum > 1 ? 1 / rawSum : 1;
 
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < selected.length; i++) {
       const pct = rawFracs[i] * scale;
       const usd = INITIAL_CAPITAL_USD * pct;
-      this.enter(top[i], usd, pct * 100, "Initial deployment");
-      console.log(`[Portfolio] Deployed ${top[i].pair} Kelly=${(rawFracs[i]*100).toFixed(1)}% → allocated ${(pct*100).toFixed(1)}% ($${usd.toFixed(0)})`);
+      this.enter(selected[i], usd, pct * 100, "Initial deployment");
+      console.log(`[Portfolio] Deployed ${selected[i].pair} Kelly=${(rawFracs[i]*100).toFixed(1)}% → allocated ${(pct*100).toFixed(1)}% ($${usd.toFixed(0)})`);
     }
     this.lastRebalance = Date.now();
   }
@@ -379,6 +415,15 @@ export class PortfolioManager {
       const cost        = pos.currentValueUsd * (ENTRY_FEE_PCT + EXIT_FEE_PCT);
       const extraPerDay = pos.currentValueUsd * (best.displayAPY - currentAPY) / 100 / 365;
       if (extraPerDay <= 0 || cost / extraPerDay > MAX_BREAKEVEN_DAYS) continue;
+
+      // Correlation guard: check exposure WITHOUT the position being exited
+      const openWithoutPos  = open.filter(p => p.poolId !== pos.poolId);
+      const newValue        = pos.currentValueUsd * (1 - EXIT_FEE_PCT);
+      const corrGuard       = correlationGuardCheck(best.pair, newValue, openWithoutPos);
+      if (!corrGuard.ok) {
+        console.log(`[Portfolio] Rebalance correlation guard: skip ${best.pair} — ${corrGuard.blockedToken} would reach ${corrGuard.newPct?.toFixed(1)}%`);
+        continue;
+      }
 
       const rarLabel = hasRAR
         ? `RAR ${best.rar7d.toFixed(2)} vs ${currentRAR.toFixed(2)}`
@@ -605,6 +650,12 @@ export class PortfolioManager {
       ?? this.lastCycle?.decisions[0]
       ?? null;
 
+    const expMap      = tokenExposureMap(open);
+    const tokenExposure: Record<string, number> = {};
+    for (const [token, usd] of expMap) {
+      tokenExposure[token] = +(usd / INITIAL_CAPITAL_USD * 100).toFixed(1);
+    }
+
     return {
       totalCapitalUsd:        INITIAL_CAPITAL_USD,
       cashUsd:                +this.cash.toFixed(2),
@@ -621,6 +672,7 @@ export class PortfolioManager {
       llmEnabled:             this.llmReady,
       lastDecision,
       lastDecisionAt:         this.lastCycle?.timestamp ?? null,
+      tokenExposure,
     };
   }
 
@@ -656,6 +708,75 @@ function computeTickRange(opp: RankedOpportunity): {
   const spacing      = TICK_SPACINGS[opp.feeTier as FeeTier] ?? 60;
   const halfTicks    = Math.ceil(rawHalfTicks / spacing) * spacing;  // snap outward
   return { tickLower: -halfTicks, tickUpper: halfTicks, halfRangePct };
+}
+
+// ─── Correlation guard helpers ────────────────────────────────────────────────
+// Normalized token names for correlation purposes.
+// WETH / cbETH / wstETH / rETH are all ETH exposure; WBTC is BTC exposure.
+const TOKEN_EQUIVALENTS: Record<string, string> = {
+  WETH:   "ETH",
+  CBETH:  "ETH",
+  WSTETH: "ETH",
+  RETH:   "ETH",
+  EZETH:  "ETH",
+  WEETH:  "ETH",
+  WBTC:   "BTC",
+};
+
+/** Split a pair string ("WETH/USDC") into normalised token symbols (["ETH", "USDC"]). */
+function extractTokens(pair: string): string[] {
+  return pair.split("/").map(s => {
+    const u = s.trim().toUpperCase();
+    return TOKEN_EQUIVALENTS[u] ?? u;
+  });
+}
+
+/** Sum each token's USD exposure across open positions (50/50 split per position). */
+function tokenExposureMap(positions: MockPosition[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const pos of positions) {
+    const half = pos.currentValueUsd / 2;
+    for (const token of extractTokens(pos.pair)) {
+      map.set(token, (map.get(token) ?? 0) + half);
+    }
+  }
+  return map;
+}
+
+interface CorrelationGuardResult {
+  ok:           boolean;
+  blockedToken?: string;
+  currentPct?:  number;
+  addedPct?:    number;
+  newPct?:      number;
+}
+
+/**
+ * Returns { ok: false } if opening a position in `pair` with `newValueUsd`
+ * would push any single token above MAX_TOKEN_EXPOSURE_PCT of total capital.
+ */
+function correlationGuardCheck(
+  pair:          string,
+  newValueUsd:   number,
+  openPositions: MockPosition[],
+): CorrelationGuardResult {
+  const exposure = tokenExposureMap(openPositions);
+  const half     = newValueUsd / 2;
+  const limit    = MAX_TOKEN_EXPOSURE_PCT * INITIAL_CAPITAL_USD;
+
+  for (const token of extractTokens(pair)) {
+    const current = exposure.get(token) ?? 0;
+    if (current + half > limit) {
+      return {
+        ok:           false,
+        blockedToken: token,
+        currentPct:   current / INITIAL_CAPITAL_USD * 100,
+        addedPct:     half    / INITIAL_CAPITAL_USD * 100,
+        newPct:       (current + half) / INITIAL_CAPITAL_USD * 100,
+      };
+    }
+  }
+  return { ok: true };
 }
 
 // Prefer RAR-7d when both sides have it; otherwise rank by net APY (fee APY − expected IL)

@@ -183,10 +183,19 @@ function buildContext(
 
   const simLines = fmtSimilar(similar);
 
+  const expEntries = Object.entries(summary.tokenExposure ?? {})
+    .filter(([, pct]) => pct >= 1)
+    .sort(([, a], [, b]) => b - a)
+    .map(([token, pct]) => `${token}=${pct.toFixed(1)}%`);
+  const exposureLine = expEntries.length > 0
+    ? `TOKEN EXPOSURE (40% limit): ${expEntries.join("  ")}`
+    : "TOKEN EXPOSURE: none yet";
+
   return [
     `Time: ${new Date().toUTCString()}`,
     ``,
     `PORTFOLIO: cash=$${summary.cashUsd.toFixed(0)} invested=$${summary.investedUsd.toFixed(0)} totalCapital=$${summary.totalCapitalUsd} positions=${summary.openPositions}/4 unrealizedPnL=$${summary.unrealizedPnlUsd.toFixed(2)} realizedPnL=$${summary.realizedPnlUsd.toFixed(2)}`,
+    exposureLine,
     ``,
     `OPPORTUNITIES (ranked RAR-7d > APY):`,
     oppLines,
@@ -303,6 +312,21 @@ function buildCritiqueContext(
     ? positions.map(p => `  ${p.pair} | ${p.chainName} | APY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}`).join("\n")
     : "  (none)";
 
+  // Token-level correlation impact for this proposed trade
+  const CORR_EQUIV: Record<string, string> = {
+    WETH: "ETH", CBETH: "ETH", WSTETH: "ETH", RETH: "ETH", EZETH: "ETH", WEETH: "ETH", WBTC: "BTC",
+  };
+  const normTok = (s: string) => { const u = s.trim().toUpperCase(); return CORR_EQUIV[u] ?? u; };
+  const newTokens   = opp.pair.split("/").map(normTok);
+  const addedUsd    = ((decision.allocationPct ?? 10) / 100 * summary.totalCapitalUsd) / 2;
+  const corrLines   = newTokens.map(token => {
+    const currentPct = summary.tokenExposure?.[token] ?? 0;
+    const addedPct   = addedUsd / summary.totalCapitalUsd * 100;
+    const newPct     = currentPct + addedPct;
+    const flag       = newPct > 40 ? " ✗ EXCEEDS 40% LIMIT" : " ✓";
+    return `  ${token}: ${currentPct.toFixed(1)}% + ${addedPct.toFixed(1)}% = ${newPct.toFixed(1)}%${flag}`;
+  }).join("\n");
+
   const simLines = fmtSimilar(similar);
 
   return [
@@ -327,6 +351,9 @@ function buildCritiqueContext(
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,
     posLines,
+    ``,
+    `TOKEN CORRELATION IMPACT (40% limit per token):`,
+    corrLines,
     ...(simLines ? [``, `PAST OUTCOMES — 3 closest market conditions (0G memory):`, simLines] : []),
   ].join("\n");
 }
