@@ -31,6 +31,7 @@ export interface RankedOpportunity {
   pairPriceChange7d:    number;
   expectedIL:           number;
   netAPY:               number;
+  liquidityQuality:     number;
   lastUpdated:          number;
 }
 

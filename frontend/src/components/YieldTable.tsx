@@ -10,7 +10,7 @@ interface Props {
 }
 
 type NetworkFilter = "all" | "mainnet" | "testnet";
-type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd";
+type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd" | "liquidityQuality";
 
 // ─── Tooltip component (portal-based to escape overflow containers) ───────────
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
@@ -71,6 +71,31 @@ const RAR_TOOLTIP_7D = `Risk-Adjusted Return (7 d)
 Higher = better return per unit of risk.
 Equivalent to Sharpe ratio (Rf = 0).
 "…" = volatility still loading.`;
+
+const LQ_TOOLTIP = `Liquidity Quality Score (0–100)
+= geomean(TVL, activity, stability, depth)
+
+TVL — pool size vs fee-tier target
+  • 0.01% pools: target $2M
+  • 0.05%: $500K · 0.3%: $200K · 1%: $100K
+
+Activity — daily vol/TVL turnover (capped at 1×)
+  Prevents one-day spikes from scoring 100%.
+
+Stability — sqrt(min(liveAPY, refAPY)/max)
+  Penalises when live and reference APYs diverge
+  sharply (volume spike or sudden collapse).
+
+Depth — TVL vs volatility-adjusted requirement
+  Volatile pairs need proportionally more TVL
+  to stay deep in their concentrated range.
+  Required TVL = max($50K, vol7d × $10K).
+
+Score interpretation:
+  80–100  deep, active, consistent pool
+  50–80   adequate but has one weak signal
+  25–50   meaningful concern — thin or unstable
+  < 25    discounted heavily in ranking`;
 
 const NET_APY_TOOLTIP = `Net APY = Fee APY − Expected IL
 
@@ -157,6 +182,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           <option value="rar24h">Sort: RAR (24h)</option>
           <option value="tvlUsd">Sort: TVL</option>
           <option value="volume24hUsd">Sort: Volume 24h</option>
+          <option value="liquidityQuality">Sort: LQ Score</option>
         </select>
 
         <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
@@ -184,6 +210,12 @@ export function YieldTable({ opportunities, isLoading }: Props) {
               <th className="px-3 py-3">Src</th>
               <th className="px-3 py-3">TVL</th>
               <th className="px-3 py-3">Vol 24h</th>
+              <th className="px-3 py-3">
+                <Tooltip text={LQ_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">LQ</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
               <th className="px-3 py-3">Risk</th>
 
               {/* RAR columns with tooltips */}
@@ -217,10 +249,10 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {isLoading && filtered.length === 0 && (
-              <tr><td colSpan={14} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
+              <tr><td colSpan={15} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
             )}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={14} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
+              <tr><td colSpan={15} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
             )}
             {filtered.map((o) => (
               <tr key={`${o.chainId}-${o.poolId}`}
@@ -247,6 +279,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                 </td>
                 <td className="px-3 py-2.5 tabular-nums text-gray-600 dark:text-gray-300 text-xs">{fmtUsd(o.tvlUsd)}</td>
                 <td className="px-3 py-2.5 tabular-nums text-gray-600 dark:text-gray-300 text-xs">{fmtUsd(o.volume24hUsd)}</td>
+                <td className="px-3 py-2.5"><LQBadge lq={o.liquidityQuality} /></td>
                 <td className="px-3 py-2.5"><RiskBadge risk={o.risk} /></td>
 
                 {/* RAR 24h */}
@@ -279,6 +312,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
         <span><strong>live</strong> = on-chain fee APY &nbsp;·&nbsp; <strong>ref</strong> = DefiLlama reference</span>
         <span><strong>Net APY ★</strong> = Fee APY − Expected IL &nbsp;·&nbsp; default sort</span>
         <span><strong>RAR</strong> = APY ÷ annualised vol (Sharpe, Rf=0) &nbsp;·&nbsp; higher is better</span>
+        <span><strong>LQ</strong> = liquidity quality 0–100 &nbsp;·&nbsp; used as √(lq/100) multiplier on RAR ranking</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -351,6 +385,19 @@ function SourceBadge({ source }: { source: string }) {
         ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
         : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"}`}>
       {source === "live" ? "live" : "ref"}
+    </span>
+  );
+}
+
+function LQBadge({ lq }: { lq: number }) {
+  if (!lq) return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  const color = lq >= 75 ? "text-emerald-600 dark:text-emerald-400"
+    : lq >= 50 ? "text-green-500 dark:text-green-400"
+    : lq >= 30 ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  return (
+    <span className={`font-mono font-semibold tabular-nums text-xs ${color}`}>
+      {lq}
     </span>
   );
 }

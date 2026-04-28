@@ -168,11 +168,12 @@ function buildContext(
   similar:   DecisionRecord[],
 ): string {
   const oppLines = opps.slice(0, 15).map(o => {
-    const il  = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
-    const net = o.expectedIL > 0 ? `netAPY=${o.netAPY.toFixed(1)}%` : `netAPY=${o.displayAPY.toFixed(1)}%`;
-    const be  = gasBreakEvenDays(o.chainId, 2500, o.displayAPY);  // ~25% of $10k typical position
+    const il    = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
+    const net   = o.expectedIL > 0 ? `netAPY=${o.netAPY.toFixed(1)}%` : `netAPY=${o.displayAPY.toFixed(1)}%`;
+    const be    = gasBreakEvenDays(o.chainId, 2500, o.displayAPY);
     const beLabel = be === Infinity ? "be=∞" : be > 99 ? "be=>99d" : `be=${be.toFixed(1)}d`;
-    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel}`;
+    const lqLabel = o.liquidityQuality > 0 ? `lq=${o.liquidityQuality}` : "lq=?";
+    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel}`;
   }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
@@ -303,7 +304,8 @@ Challenge every proposed entry. Look hard for:
 - Weak RAR: RAR-7d ≤ 2.0 is mediocre — is this really worth the IL exposure?
 - Price momentum risk: if the pair moved >5% in 7d, the position may already be out of range
 - TVL red flags: low TVL means thin liquidity, high slippage, and rug exposure
-- APY mirage: unsustainably high APY driven by one-off volume spikes — will it revert?
+- APY mirage: unsustainably high APY driven by one-off volume spikes — will it revert? Check lq score: < 40 is a strong warning
+- Liquidity quality: lq/100 composite score (TVL adequacy × vol/TVL activity × APY stability × depth). Score < 40 = thin/unstable pool; weight this heavily
 - Overconcentration: does the portfolio already hold similar token exposure?
 - Stale data: if RAR is n/a, you have incomplete information — is that acceptable?
 - Opportunity cost: is this meaningfully better than cash given the risks?
@@ -366,6 +368,7 @@ function buildCritiqueContext(
     `  Pair price Δ7d: ${(opp.pairPriceChange7d * 100).toFixed(1)}%`,
     `  Allocation:     ${alloc} of $${summary.totalCapitalUsd} total capital`,
     `  Gas break-even: ${beLabel} (entry+exit gas vs LP fees at this size)`,
+    `  Liquidity quality: ${opp.liquidityQuality > 0 ? opp.liquidityQuality + "/100" : "?"} (TVL adequacy × vol/TVL activity × APY stability × depth vs vol)`,
     ``,
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,

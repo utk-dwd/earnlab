@@ -5,6 +5,7 @@ import { UniswapV4Scanner, type PoolState } from "./scanner/UniswapV4Scanner";
 import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
 import { SlippageGuard } from "./calculator/SlippageGuard";
 import { computePairRAR, type RARResult } from "./calculator/VolatilityCalculator";
+import { computeLiquidityQuality, lqRankFactor } from "./calculator/LiquidityQualityCalculator";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
 import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
 
@@ -52,6 +53,12 @@ export interface RankedOpportunity {
   expectedIL:    number;
   /** Net APY = displayAPY − expectedIL. Can be negative for volatile pairs. */
   netAPY:        number;
+  /**
+   * Composite liquidity-quality score 0–100.
+   * Geometric mean of: TVL adequacy, vol/TVL activity, APY stability, depth vs vol.
+   * Used as a √(lq/100) multiplier on RAR for final ranking.
+   */
+  liquidityQuality: number;
   lastUpdated:   number;
 }
 
@@ -113,6 +120,11 @@ export class ReporterAgent {
         const displayAPY  = p.liveAPY > 0.01 ? p.liveAPY : p.referenceAPY;
         const apySource   = p.liveAPY > 0.01 ? "live" : "reference";
         const prev        = prevRar.get(p.poolId);
+        const lq = computeLiquidityQuality(
+          p.tvlUsd, p.volume24hUsd, p.poolKey.fee,
+          p.liveAPY, p.referenceAPY, apySource,
+          prev?.vol7d ?? 0,
+        );
         return {
           rank:         0,
           chainId:      p.chainId,
@@ -144,6 +156,7 @@ export class ReporterAgent {
           pairPriceChange7d:    prev?.pairPriceChange7d    ?? 0,
           expectedIL:           prev?.expectedIL           ?? 0,
           netAPY:               prev?.netAPY               ?? displayAPY,
+          liquidityQuality:     prev?.liquidityQuality     ?? lq.score,
           lastUpdated:  p.lastUpdated,
           // stash addresses for RAR calc
           _token0Address: p.poolKey.currency0,
@@ -152,7 +165,7 @@ export class ReporterAgent {
           _token1Symbol:  p.token1Symbol,
         } as any;
       })
-      .sort((a, b) => b.displayAPY - a.displayAPY)
+      .sort((a, b) => b.displayAPY * lqRankFactor(b.liquidityQuality) - a.displayAPY * lqRankFactor(a.liquidityQuality))
       .map((o, i) => ({ ...o, rank: i + 1 }));
   }
 
@@ -184,23 +197,37 @@ export class ReporterAgent {
         // IL = 0.5 × σ² (annualised). vol7d is in %, so divide by 100 first.
         opp.expectedIL = rar.vol7d > 0 ? 0.5 * (rar.vol7d / 100) ** 2 * 100 : 0;
         opp.netAPY     = opp.displayAPY - opp.expectedIL;
+        // Recompute LQ now that vol7d is available (depth component becomes accurate)
+        opp.liquidityQuality = computeLiquidityQuality(
+          opp.tvlUsd, opp.volume24hUsd, opp.feeTier,
+          opp.liveAPY, opp.referenceAPY, opp.apySource,
+          opp.vol7d,
+        ).score;
       })
     );
+    // Re-sort and re-rank: LQ-adjusted RAR (or netAPY when RAR unavailable)
+    ranked.sort((a, b) => {
+      const sa = (a.rar7d > 0 ? a.rar7d : a.netAPY / 50) * lqRankFactor(a.liquidityQuality);
+      const sb = (b.rar7d > 0 ? b.rar7d : b.netAPY / 50) * lqRankFactor(b.liquidityQuality);
+      return sb - sa;
+    });
+    ranked.forEach((o, i) => { o.rank = i + 1; });
   }
 
   // ─── Console table ────────────────────────────────────────────────────────
   private printTable(opps: RankedOpportunity[]): void {
     console.log(
-      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"RAR-24h".padEnd(9)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} Risk`
+      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"RAR-24h".padEnd(9)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} ${"LQ".padEnd(6)} Risk`
     );
-    console.log("─".repeat(88));
+    console.log("─".repeat(96));
     for (const o of opps) {
       const rar24 = o.rar24h > 0 ? o.rar24h.toFixed(2) : "…";
       const rar7d = o.rar7d  > 0 ? o.rar7d.toFixed(2)  : "…";
+      const lq    = o.liquidityQuality > 0 ? String(o.liquidityQuality) : "…";
       console.log(
         `${String(o.rank).padEnd(4)} ${o.chainName.padEnd(17)} ${o.pair.padEnd(13)} ` +
         `${formatAPY(o.displayAPY).padEnd(9)} ${rar24.padEnd(9)} ${rar7d.padEnd(9)} ` +
-        `$${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${o.risk}`
+        `$${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${lq.padEnd(6)} ${o.risk}`
       );
     }
   }
