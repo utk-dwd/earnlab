@@ -107,6 +107,8 @@ export interface MockPosition {
   closedTimestamp?: number;
   closedValueUsd?:  number;
   closeReason?:     string;
+  timeInRangePct:  number;
+  exitAlerts:      string[];
 }
 
 export interface PortfolioTrade {

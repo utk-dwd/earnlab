@@ -131,9 +131,11 @@ function buildContext(
   }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
-    ? positions.map(p =>
-        `  ${p.poolId} | ${p.pair} | ${p.chainName} | invested=$${p.entryValueUsd.toFixed(0)} | entryAPY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}`
-      ).join("\n")
+    ? positions.map(p => {
+        const tir    = p.timeInRangePct != null ? ` TiR=${p.timeInRangePct.toFixed(0)}%` : "";
+        const alerts = p.exitAlerts?.length ? ` ⚠ ${p.exitAlerts.join("; ")}` : "";
+        return `  ${p.poolId} | ${p.pair} | ${p.chainName} | invested=$${p.entryValueUsd.toFixed(0)} | entryAPY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)}${tir}${alerts}`;
+      }).join("\n")
     : "  (none — portfolio is empty)";
 
   const memLines = recent.length > 0

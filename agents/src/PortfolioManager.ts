@@ -16,6 +16,14 @@ const CHECK_INTERVAL_MS    = 5 * 60_000;
 const CONFIDENCE_THRESHOLD = 0.75;
 const DECISION_HISTORY_MAX = 50;
 
+// ─── Exit trigger thresholds ─────────────────────────────────────────────────
+const RAR_DETERIORATION_RATIO  = 0.50;  // exit if current RAR7d < entry × 0.5
+const BETTER_OPP_RAR_RATIO     = 1.50;  // flag/exit if competitor RAR7d > current × 1.5
+const PRICE_MOVE_THRESHOLD_PCT = 15;    // exit if |pairPriceChange7d| > 15%
+const TIME_IN_RANGE_MIN_PCT    = 80;    // exit if estimated time-in-range < 80%
+const STALE_DAYS               = 30;    // position is "stale" after this many days
+const STALE_NET_APY_MIN        = 5;     // stale position must have at least this net APY
+
 let _seq = 0;
 const nextId = () => `${Date.now()}-${++_seq}`;
 
@@ -42,6 +50,10 @@ export interface MockPosition {
   closedTimestamp?: number;
   closedValueUsd?:  number;
   closeReason?:     string;
+  /** 0–100. Estimated % of time price was within tick range (proxy: decreases with pair price divergence). */
+  timeInRangePct:  number;
+  /** Active exit trigger descriptions. Updated every tick; empty = healthy. */
+  exitAlerts:      string[];
 }
 
 export interface PortfolioTrade {
@@ -129,6 +141,9 @@ export class PortfolioManager {
   // ─── Main tick ───────────────────────────────────────────────────────────
   private async tick(): Promise<void> {
     this.updateValues();
+
+    // Evaluate exit triggers every tick — updates alerts for UI and auto-exits when warranted
+    this.evaluateExitTriggers();
 
     const trigger = this.openList().length === 0 ? "deploy" : "rebalance";
 
@@ -346,6 +361,71 @@ export class PortfolioManager {
     }
   }
 
+  // ─── Exit trigger evaluation ─────────────────────────────────────────────
+  private evaluateExitTriggers(): void {
+    const allOpps = this.reporter.getLatest();
+    const open    = this.openList();
+    if (open.length === 0) return;
+
+    // Best candidate NOT currently held — used for "better opportunity" trigger
+    const held    = new Set(open.map(p => p.poolId));
+    const bestOpp = [...allOpps]
+      .filter(o => !held.has(o.poolId) && o.displayAPY > 0)
+      .sort(rarOrApySort)[0] ?? null;
+
+    for (const pos of open) {
+      const opp        = allOpps.find(o => o.poolId === pos.poolId);
+      const currentRAR = opp?.rar7d     ?? 0;
+      const currentNet = opp?.netAPY    ?? pos.entryAPY;
+      const pairMove   = Math.abs(opp?.pairPriceChange7d ?? 0) * 100; // %
+
+      // Time-in-range proxy: 100% at <5% price move, drops ~4%/pct-move beyond that
+      // Represents a ±10% tick range — drifts out as price diverges
+      pos.timeInRangePct = Math.max(0, Math.min(100, 100 - Math.max(0, pairMove - 5) * 4));
+
+      const heldH  = pos.hoursHeld;
+      const alerts: string[] = [];
+
+      // 1. RAR deteriorated (only meaningful if both entry and current RAR are available)
+      if (pos.entryRAR7d > 0 && currentRAR > 0 && currentRAR < pos.entryRAR7d * RAR_DETERIORATION_RATIO) {
+        const drop = ((1 - currentRAR / pos.entryRAR7d) * 100).toFixed(0);
+        alerts.push(`RAR deteriorated: ${pos.entryRAR7d.toFixed(2)} → ${currentRAR.toFixed(2)} (−${drop}% from entry)`);
+      }
+
+      // 2. Better opportunity exists
+      if (bestOpp && bestOpp.rar7d > 0 && currentRAR > 0 && bestOpp.rar7d > currentRAR * BETTER_OPP_RAR_RATIO) {
+        const pct = ((bestOpp.rar7d / currentRAR - 1) * 100).toFixed(0);
+        alerts.push(`Better opportunity: ${bestOpp.pair} RAR ${bestOpp.rar7d.toFixed(2)} vs ${currentRAR.toFixed(2)} (+${pct}%)`);
+      }
+
+      // 3. Significant price move (IL accelerates)
+      if (opp && pairMove > PRICE_MOVE_THRESHOLD_PCT) {
+        const dir = (opp.pairPriceChange7d > 0 ? "+" : "") + (opp.pairPriceChange7d * 100).toFixed(1);
+        alerts.push(`Price move ${dir}% in 7d — IL risk (threshold ±${PRICE_MOVE_THRESHOLD_PCT}%)`);
+      }
+
+      // 4. Time-in-range below threshold
+      if (pos.timeInRangePct < TIME_IN_RANGE_MIN_PCT) {
+        alerts.push(`Out of range: ~${pos.timeInRangePct.toFixed(0)}% time-in-range (< ${TIME_IN_RANGE_MIN_PCT}%)`);
+      }
+
+      // 5. Stale and low-yield
+      if (heldH > STALE_DAYS * 24 && currentNet < STALE_NET_APY_MIN) {
+        alerts.push(`Stale: ${(heldH / 24).toFixed(0)}d held, netAPY ${currentNet.toFixed(1)}% < ${STALE_NET_APY_MIN}%`);
+      }
+
+      pos.exitAlerts = alerts;
+
+      // ── Auto-exit: fire when held ≥ minimum and at least one trigger is active ──
+      if (heldH < MIN_HOLD_HOURS || alerts.length === 0) continue;
+
+      const [reason] = alerts;
+      console.log(`[Portfolio] Exit trigger — ${pos.pair}@${pos.chainName}: ${reason}`);
+      this.exit(pos, reason);
+      this.lastRebalance = Date.now();
+    }
+  }
+
   // ─── Simulated LP value accrual ──────────────────────────────────────────
   private updateValues(): void {
     for (const pos of this.openList()) {
@@ -383,6 +463,8 @@ export class PortfolioManager {
       pnlPct:          0,
       hoursHeld:       0,
       status:          "open",
+      timeInRangePct:  100,
+      exitAlerts:      [],
     };
     this.positions.set(opp.poolId, pos);
     this.trades.push({

@@ -65,15 +65,59 @@ function fmtHours(h: number) {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: "open" | "closed" }) {
+function StatusBadge({ status, alertCount }: { status: "open" | "closed"; alertCount?: number }) {
   return (
     <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
       status === "open"
-        ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"
+        ? alertCount
+          ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+          : "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"
         : "bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-400"
     }`}>
-      {status.toUpperCase()}
+      {status === "open" && alertCount ? `⚠ ${alertCount}` : status.toUpperCase()}
     </span>
+  );
+}
+
+function TimeInRangeBar({ pct }: { pct: number }) {
+  const color = pct >= 80 ? "bg-green-500" : pct >= 50 ? "bg-amber-400" : "bg-red-500";
+  return (
+    <div className="flex items-center gap-1 mt-1">
+      <div className="w-12 h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs tabular-nums text-gray-400">{pct.toFixed(0)}%</span>
+    </div>
+  );
+}
+
+function ExitAlertRow({ alerts, closeReason, colSpan }: {
+  alerts?: string[]; closeReason?: string; colSpan: number;
+}) {
+  if (closeReason) {
+    return (
+      <tr className="bg-gray-50 dark:bg-gray-800/40">
+        <td colSpan={colSpan} className="px-4 pb-2 pt-0">
+          <span className="text-xs text-gray-500 dark:text-gray-400 italic">
+            Closed: {closeReason}
+          </span>
+        </td>
+      </tr>
+    );
+  }
+  if (!alerts?.length) return null;
+  return (
+    <tr className="bg-amber-50 dark:bg-amber-900/10">
+      <td colSpan={colSpan} className="px-4 pb-2 pt-0">
+        <div className="flex flex-wrap gap-2">
+          {alerts.map((a, i) => (
+            <span key={i} className="text-xs text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/30 rounded px-1.5 py-0.5">
+              ⚠ {a}
+            </span>
+          ))}
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -211,16 +255,22 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                   : null;
 
                 const unrealisedPnl = pos.status === "open" ? pos.pnlUsd : null;
+                const alertCount    = pos.exitAlerts?.length ?? 0;
+                const COL_SPAN      = 13;
 
                 return (
+                  <>
                   <tr key={pos.id}
                     className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors ${
                       pos.status === "closed" ? "opacity-70" : ""
-                    }`}>
+                    } ${alertCount > 0 ? "border-l-2 border-amber-400" : ""}`}>
 
-                    {/* Status */}
+                    {/* Status + time-in-range for open positions */}
                     <td className="px-3 py-3">
-                      <StatusBadge status={pos.status} />
+                      <StatusBadge status={pos.status} alertCount={alertCount} />
+                      {pos.status === "open" && pos.timeInRangePct != null && (
+                        <TimeInRangeBar pct={pos.timeInRangePct} />
+                      )}
                     </td>
 
                     {/* Date — entry date, and exit date if closed */}
@@ -298,6 +348,15 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
                       <GradeBadge grade={grade} />
                     </td>
                   </tr>
+                  {/* Alert / close-reason strip */}
+                  {(alertCount > 0 || pos.closeReason) && (
+                    <ExitAlertRow
+                      alerts={pos.exitAlerts}
+                      closeReason={pos.closeReason}
+                      colSpan={COL_SPAN}
+                    />
+                  )}
+                  </>
                 );
               })}
             </tbody>
@@ -306,15 +365,15 @@ export function PositionsTable({ positions, summary, isLoading }: Props) {
 
         {/* ── Footer legend ── */}
         <div className="px-4 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-400 flex flex-wrap gap-4">
-          <span><strong>Grade</strong> based on RAR-7d at entry &nbsp;·&nbsp;
-            <span className="text-emerald-600 font-semibold">A</span> ≥2.0 &nbsp;
-            <span className="text-green-500  font-semibold">B</span> ≥1.0 &nbsp;
-            <span className="text-yellow-500 font-semibold">C</span> ≥0.5 &nbsp;
-            <span className="text-orange-500 font-semibold">D</span> &gt;0 &nbsp;
-            <span className="text-red-500    font-semibold">F</span> no data
+          <span><strong>Grade</strong> — RAR-7d at entry:
+            <span className="text-emerald-600 font-semibold"> A</span> ≥2.0
+            <span className="text-green-500  font-semibold"> B</span> ≥1.0
+            <span className="text-yellow-500 font-semibold"> C</span> ≥0.5
+            <span className="text-orange-500 font-semibold"> D</span> &gt;0
+            <span className="text-red-500    font-semibold"> F</span> none
           </span>
-          <span><strong>PnL</strong> = LP fees earned − swap fees paid (0.1% entry + 0.1% exit)</span>
-          <span><strong>Exit value</strong> for open positions shows current simulated value</span>
+          <span><strong>TiR bar</strong> = estimated time-in-range (proxy: pair price divergence from entry)</span>
+          <span><strong>⚠ alerts</strong> — RAR drop &gt;50%, better opp &gt;1.5×, price move &gt;15%, TiR &lt;80%, stale &lt;5% netAPY after 30d</span>
         </div>
       </div>
     </div>
