@@ -132,11 +132,13 @@ export class ReflectionAgent {
   private buildMessages(): OpenAI.Chat.ChatCompletionMessageParam[] {
     const opps = this.reporter.getLatest()
       .filter(o => o.displayAPY > 0)
-      .sort((a, b) => b.rar7d - a.rar7d)
+      .sort((a, b) => (b.netAPY ?? b.displayAPY) - (a.netAPY ?? a.displayAPY))
       .slice(0, 10)
-      .map(o =>
-        `${o.pair} ${o.chainName} APY=${o.displayAPY.toFixed(1)}% RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} TVL=${fmtUsd(o.tvlUsd)} Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}%`
-      )
+      .map(o => {
+        const il  = o.expectedIL > 0 ? ` IL=${o.expectedIL.toFixed(1)}%` : "";
+        const net = o.expectedIL > 0 ? ` net=${o.netAPY.toFixed(1)}%` : "";
+        return `${o.pair} ${o.chainName} feeAPY=${o.displayAPY.toFixed(1)}%${net}${il} RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} TVL=${fmtUsd(o.tvlUsd)} Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}%`;
+      })
       .join("; ");
 
     const summary   = this.portfolio.getSummary();

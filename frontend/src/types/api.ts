@@ -29,6 +29,8 @@ export interface RankedOpportunity {
   token1PriceChange7d:  number;
   pairPriceChange24h:   number;
   pairPriceChange7d:    number;
+  expectedIL:           number;
+  netAPY:               number;
   lastUpdated:          number;
 }
 

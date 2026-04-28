@@ -60,12 +60,14 @@ Hard constraints (enforced by executor — violations are silently ignored):
 - Rebalance: new pool must be >30 % better RAR-7d; fee must recover within 7 days
 - Only decisions with confidence >= 0.75 are executed
 
+Ranking priority: prefer pools with high netAPY (= feeAPY − expectedIL). Stable pairs with low IL often beat volatile pairs with high fee APY. Use RAR-7d when available as secondary confirmation.
+
 Decision guide:
-- enter:     open a new LP position in pool (use when cash is available and there are strong opportunities)
-- exit:      close an existing position (use when RAR degrades or better opportunity exists and position is ≥24 h old)
+- enter:     open a new LP position in pool (use when cash is available and netAPY is attractive)
+- exit:      close an existing position (use when netAPY or RAR degrades, or better opportunity exists and position is ≥24 h old)
 - rebalance: exit the weakest current position and enter pool in one step
 - hold:      keep current state — use a single hold decision when no action is warranted
-- wait:      data not ready (e.g. RAR still computing) — treated same as hold
+- wait:      data not ready (e.g. IL/RAR still computing) — treated same as hold
 
 Provide multiple decisions if warranted (e.g. enter 2 pools when portfolio is empty).
 For hold/wait, include exactly one decision with no pool field.`;
@@ -122,9 +124,11 @@ function buildContext(
   positions: MockPosition[],
   recent:    any[],
 ): string {
-  const oppLines = opps.slice(0, 15).map(o =>
-    `  ${o.poolId} | ${o.pair} | ${o.chainName} | APY=${o.displayAPY.toFixed(1)}% | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | quality=${o.rarQuality}`
-  ).join("\n") || "  (none yet)";
+  const oppLines = opps.slice(0, 15).map(o => {
+    const il = o.expectedIL > 0 ? `IL=${o.expectedIL.toFixed(1)}%` : "IL=n/a";
+    const net = o.expectedIL > 0 ? `netAPY=${o.netAPY.toFixed(1)}%` : `netAPY=${o.displayAPY.toFixed(1)}%`;
+    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}%`;
+  }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
     ? positions.map(p =>

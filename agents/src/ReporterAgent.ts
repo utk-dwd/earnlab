@@ -47,6 +47,11 @@ export interface RankedOpportunity {
   token1PriceChange7d:  number;
   pairPriceChange24h:   number;
   pairPriceChange7d:    number;
+  // ── Net APY (fee APY minus expected impermanent loss) ─────────────────────
+  /** Annualised expected IL % = 0.5 × (vol7d/100)² × 100. 0 = vol not yet computed. */
+  expectedIL:    number;
+  /** Net APY = displayAPY − expectedIL. Can be negative for volatile pairs. */
+  netAPY:        number;
   lastUpdated:   number;
 }
 
@@ -137,6 +142,8 @@ export class ReporterAgent {
           token1PriceChange7d:  prev?.token1PriceChange7d  ?? 0,
           pairPriceChange24h:   prev?.pairPriceChange24h   ?? 0,
           pairPriceChange7d:    prev?.pairPriceChange7d    ?? 0,
+          expectedIL:           prev?.expectedIL           ?? 0,
+          netAPY:               prev?.netAPY               ?? displayAPY,
           lastUpdated:  p.lastUpdated,
           // stash addresses for RAR calc
           _token0Address: p.poolKey.currency0,
@@ -174,6 +181,9 @@ export class ReporterAgent {
         opp.token1PriceChange7d  = rar.token1PriceChange7d;
         opp.pairPriceChange24h = rar.pairPriceChange24h;
         opp.pairPriceChange7d  = rar.pairPriceChange7d;
+        // IL = 0.5 × σ² (annualised). vol7d is in %, so divide by 100 first.
+        opp.expectedIL = rar.vol7d > 0 ? 0.5 * (rar.vol7d / 100) ** 2 * 100 : 0;
+        opp.netAPY     = opp.displayAPY - opp.expectedIL;
       })
     );
   }

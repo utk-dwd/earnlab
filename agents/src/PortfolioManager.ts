@@ -475,10 +475,10 @@ export class PortfolioManager {
   }
 }
 
-// Prefer RAR-7d when both sides have it; otherwise rank by APY
+// Prefer RAR-7d when both sides have it; otherwise rank by net APY (fee APY − expected IL)
 function rarOrApySort(a: RankedOpportunity, b: RankedOpportunity): number {
   if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d - a.rar7d;
   if (a.rar7d > 0) return -1;
   if (b.rar7d > 0) return 1;
-  return b.displayAPY - a.displayAPY;
+  return b.netAPY - a.netAPY;
 }

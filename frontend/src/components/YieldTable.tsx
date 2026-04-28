@@ -10,7 +10,7 @@ interface Props {
 }
 
 type NetworkFilter = "all" | "mainnet" | "testnet";
-type SortKey = "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd";
+type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd";
 
 // ─── Tooltip component (portal-based to escape overflow containers) ───────────
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
@@ -72,6 +72,24 @@ Higher = better return per unit of risk.
 Equivalent to Sharpe ratio (Rf = 0).
 "…" = volatility still loading.`;
 
+const NET_APY_TOOLTIP = `Net APY = Fee APY − Expected IL
+
+Expected IL = 0.5 × σ₇ₐ²  (annualised)
+  where σ₇ₐ is the 7d annualised volatility of
+  the more volatile token in the pair.
+
+Stable pairs (σ ≈ 0): Net APY ≈ Fee APY
+Volatile pairs: Net APY is substantially lower
+  and can be negative in drawdowns.
+
+Example: AAVE/USDC
+  Fee APY 154%, vol7d 80%
+  Expected IL = 0.5 × 0.80² × 100 = 32%
+  Net APY ≈ 122%
+
+"—" = volatility not yet computed.
+Sorted by Net APY by default (★).`;
+
 const PRICE_CHANGE_24H_TOOLTIP = `Pair Price Change (24 h)
 = (rate_now − rate_24h_ago) / rate_24h_ago
 
@@ -95,13 +113,21 @@ data used for volatility.
 // ─── Main table ───────────────────────────────────────────────────────────────
 export function YieldTable({ opportunities, isLoading }: Props) {
   const [networkFilter, setNetworkFilter] = useState<NetworkFilter>("all");
-  const [sortKey,       setSortKey]       = useState<SortKey>("displayAPY");
+  const [sortKey,       setSortKey]       = useState<SortKey>("netAPY");
   const [showRefOnly,   setShowRefOnly]   = useState(false);
 
   const filtered = opportunities
     .filter((o) => networkFilter === "all" || o.network === networkFilter)
     .filter((o) => !showRefOnly || o.apySource === "reference")
-    .sort((a, b) => (b[sortKey] as number) - (a[sortKey] as number));
+    .sort((a, b) => {
+      // For netAPY, fall back to displayAPY when expectedIL hasn't been computed yet
+      if (sortKey === "netAPY") {
+        const aN = a.expectedIL > 0 ? a.netAPY : a.displayAPY;
+        const bN = b.expectedIL > 0 ? b.netAPY : b.displayAPY;
+        return bN - aN;
+      }
+      return (b[sortKey] as number) - (a[sortKey] as number);
+    });
 
   return (
     <div className="rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -125,7 +151,8 @@ export function YieldTable({ opportunities, isLoading }: Props) {
 
         <select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)}
           className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200">
-          <option value="displayAPY">Sort: APY</option>
+          <option value="netAPY">Sort: Net APY ★</option>
+          <option value="displayAPY">Sort: Fee APY</option>
           <option value="rar7d">Sort: RAR (7d)</option>
           <option value="rar24h">Sort: RAR (24h)</option>
           <option value="tvlUsd">Sort: TVL</option>
@@ -147,7 +174,13 @@ export function YieldTable({ opportunities, isLoading }: Props) {
               <th className="px-3 py-3">Chain</th>
               <th className="px-3 py-3">Pair</th>
               <th className="px-3 py-3">Fee</th>
-              <th className="px-3 py-3">APY</th>
+              <th className="px-3 py-3">Fee APY</th>
+              <th className="px-3 py-3">
+                <Tooltip text={NET_APY_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Net APY ★</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
               <th className="px-3 py-3">Src</th>
               <th className="px-3 py-3">TVL</th>
               <th className="px-3 py-3">Vol 24h</th>
@@ -184,10 +217,10 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {isLoading && filtered.length === 0 && (
-              <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
+              <tr><td colSpan={14} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
             )}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
+              <tr><td colSpan={14} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
             )}
             {filtered.map((o) => (
               <tr key={`${o.chainId}-${o.poolId}`}
@@ -202,9 +235,12 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                 <td className="px-3 py-2.5 font-mono font-semibold dark:text-gray-100">{o.pair}</td>
                 <td className="px-3 py-2.5 text-gray-500 dark:text-gray-400 text-xs">{o.feeTierLabel}</td>
                 <td className="px-3 py-2.5">
-                  <span className={`font-bold tabular-nums ${apyColor(o.displayAPY)}`}>
+                  <span className={`tabular-nums ${apyColor(o.displayAPY)}`}>
                     {o.displayAPY.toFixed(2)}%
                   </span>
+                </td>
+                <td className="px-3 py-2.5">
+                  <NetAPYCell feeAPY={o.displayAPY} expectedIL={o.expectedIL} netAPY={o.netAPY} />
                 </td>
                 <td className="px-3 py-2.5">
                   <SourceBadge source={o.apySource} />
@@ -240,8 +276,9 @@ export function YieldTable({ opportunities, isLoading }: Props) {
 
       {/* ── Legend ── */}
       <div className="px-4 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-400 flex flex-wrap gap-4">
-        <span><strong>live</strong> = on-chain fee APY &nbsp;·&nbsp; <strong>ref</strong> = DefiLlama mainnet reference</span>
-        <span><strong>RAR</strong> = APY ÷ annualised volatility (Sharpe, Rf=0) &nbsp;·&nbsp; higher is better</span>
+        <span><strong>live</strong> = on-chain fee APY &nbsp;·&nbsp; <strong>ref</strong> = DefiLlama reference</span>
+        <span><strong>Net APY ★</strong> = Fee APY − Expected IL &nbsp;·&nbsp; default sort</span>
+        <span><strong>RAR</strong> = APY ÷ annualised vol (Sharpe, Rf=0) &nbsp;·&nbsp; higher is better</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -272,6 +309,24 @@ function RARCell({ rar, vol, quality, window: win }: {
     <Tooltip text={tooltip}>
       <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color[quality] ?? "text-gray-500"}`}>
         {rar.toFixed(2)}
+      </span>
+    </Tooltip>
+  );
+}
+
+function NetAPYCell({ feeAPY, expectedIL, netAPY }: { feeAPY: number; expectedIL: number; netAPY: number }) {
+  if (expectedIL === 0) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">—</span>;
+  }
+  const tooltip = `Net APY = ${netAPY.toFixed(2)}%\nFee APY = ${feeAPY.toFixed(2)}%\nExpected IL = ${expectedIL.toFixed(2)}%`;
+  const color = netAPY >= 20 ? "text-emerald-600 dark:text-emerald-400"
+    : netAPY >= 5  ? "text-green-500 dark:text-green-400"
+    : netAPY >= 0  ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  return (
+    <Tooltip text={tooltip}>
+      <span className={`font-bold tabular-nums text-xs cursor-help ${color}`}>
+        {netAPY >= 0 ? "" : "−"}{Math.abs(netAPY).toFixed(1)}%
       </span>
     </Tooltip>
   );
