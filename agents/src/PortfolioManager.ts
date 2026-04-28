@@ -6,6 +6,21 @@ import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClie
 import { TICK_SPACINGS, gasBreakEvenDays } from "./config/chains";
 import type { FeeTier } from "./config/chains";
 
+// ─── Regime ───────────────────────────────────────────────────────────────────
+export type MacroRegime = "risk-off" | "neutral" | "risk-on";
+const REGIME_ETH_THRESHOLD_PCT = 5;   // |median ETH Δ7d| threshold
+const KELLY_SCALE_RISK_OFF     = 0.5; // halve sizing when risk-off
+const KELLY_SCALE_RISK_ON      = 1.5; // allow 50% larger Kelly when risk-on
+
+// Stablecoins — used for stable-pool preference in risk-off mode
+const STABLECOINS = new Set([
+  "USDC","USDT","DAI","USDB","CUSD","FRAX","LUSD","BUSD","PYUSD","GHO","CRVUSD","SUSD","MIM","USDBC",
+]);
+
+function isStablePool(pair: string): boolean {
+  return pair.split("/").every(t => STABLECOINS.has(t.trim().toUpperCase()));
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INITIAL_CAPITAL_USD = 10_000;
 const MAX_POSITION_PCT    = 0.30;   // max 30% of capital per pair
@@ -98,6 +113,7 @@ export interface PortfolioSummary {
   lastDecision:           AgentDecision | null;
   lastDecisionAt:         number | null;
   tokenExposure:          Record<string, number>;  // normalised token → % of totalCapital
+  regime:                 MacroRegime;
 }
 
 export type { AgentDecision, DecisionCycle };
@@ -118,6 +134,7 @@ export class PortfolioManager {
   private llmReady         = false;
   private lastCycle:       DecisionCycle | null = null;
   private decisionHistory: DecisionCycle[] = [];
+  private regime:          MacroRegime = "neutral";
 
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
@@ -151,6 +168,11 @@ export class PortfolioManager {
 
   // ─── Main tick ───────────────────────────────────────────────────────────
   private async tick(): Promise<void> {
+    const prev = this.regime;
+    this.regime = this.detectRegime();
+    if (this.regime !== prev) {
+      console.log(`[Portfolio] Regime changed: ${prev} → ${this.regime}`);
+    }
     this.updateValues();
 
     // Evaluate exit triggers every tick — updates alerts for UI and auto-exits when warranted
@@ -332,13 +354,14 @@ export class PortfolioManager {
 
   // ─── Kelly-inspired position sizing ─────────────────────────────────────
   // f* = (RAR − 1) / RAR, scaled to ¼ Kelly, capped at MAX_POSITION_PCT.
-  // Falls back to equal-weight when RAR ≤ 1 or unavailable.
+  // Regime multiplier: risk-off halves sizing; risk-on adds 50% (still capped).
   private kellyAllocation(opp: RankedOpportunity): number {
-    if (opp.rar7d > 1) {
-      const full = (opp.rar7d - 1) / opp.rar7d;
-      return Math.min(full * 0.25, MAX_POSITION_PCT);
-    }
-    return MAX_POSITION_PCT / TARGET_POSITIONS;  // equal-weight fallback
+    const base = opp.rar7d > 1
+      ? Math.min((opp.rar7d - 1) / opp.rar7d * 0.25, MAX_POSITION_PCT)
+      : MAX_POSITION_PCT / TARGET_POSITIONS;
+    if (this.regime === "risk-off") return base * KELLY_SCALE_RISK_OFF;
+    if (this.regime === "risk-on")  return Math.min(base * KELLY_SCALE_RISK_ON, MAX_POSITION_PCT);
+    return base;
   }
 
   // ─── Rule-based fallback: initial deployment ─────────────────────────────
@@ -635,14 +658,42 @@ export class PortfolioManager {
   }
 
   // ─── Opportunity ranking ─────────────────────────────────────────────────
+  // In risk-off, stable-stable pools are promoted to the front of the list.
   private rankedCandidates(): RankedOpportunity[] {
-    return this.reporter.getLatest()
+    const opps = this.reporter.getLatest()
       .filter(o => o.displayAPY > 0)
       .sort(rarOrApySort);
+    if (this.regime === "risk-off") {
+      const stable = opps.filter(o =>  isStablePool(o.pair));
+      const other  = opps.filter(o => !isStablePool(o.pair));
+      return [...stable, ...other];
+    }
+    return opps;
   }
 
   private openList(): MockPosition[] {
     return [...this.positions.values()].filter(p => p.status === "open");
+  }
+
+  // ─── Macro regime detection ───────────────────────────────────────────────
+  // Compute median 7-day price change across all ETH-containing pools.
+  // Risk-off < -5%, neutral -5%–+5%, risk-on > +5%.
+  private detectRegime(): MacroRegime {
+    const ethPairs = this.reporter.getLatest()
+      .filter(o => extractTokens(o.pair).includes("ETH"));
+    if (ethPairs.length === 0) return "neutral";
+
+    const changes = ethPairs
+      .map(o => o.pairPriceChange7d * 100)
+      .sort((a, b) => a - b);
+    const mid    = Math.floor(changes.length / 2);
+    const median = changes.length % 2 === 1
+      ? changes[mid]
+      : (changes[mid - 1] + changes[mid]) / 2;
+
+    if (median < -REGIME_ETH_THRESHOLD_PCT) return "risk-off";
+    if (median >  REGIME_ETH_THRESHOLD_PCT) return "risk-on";
+    return "neutral";
   }
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -686,6 +737,7 @@ export class PortfolioManager {
       lastDecision,
       lastDecisionAt:         this.lastCycle?.timestamp ?? null,
       tokenExposure,
+      regime:                 this.regime,
     };
   }
 

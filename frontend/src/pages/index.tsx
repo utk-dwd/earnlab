@@ -6,7 +6,7 @@ import { YieldTable }         from "../components/YieldTable";
 import { PositionsTable }     from "../components/PositionsTable";
 import { ReflectionSidebar }  from "../components/ReflectionSidebar";
 import { DecisionFeed }       from "../components/DecisionFeed";
-import type { RankedOpportunity, PortfolioSummary, MockPosition } from "../types/api";
+import type { RankedOpportunity, PortfolioSummary, MockPosition, MacroRegime } from "../types/api";
 
 const API = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:3001";
 
@@ -118,6 +118,9 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* Regime banner */}
+            {portfolio && <RegimeBanner regime={portfolio.regime} />}
+
             {/* Tabs */}
             <div className="border-b border-gray-200 dark:border-gray-700">
               <nav className="-mb-px flex gap-6">
@@ -218,6 +221,26 @@ function StatCard({ label, value, positive }: { label: string; value: string; po
       }`}>
         {value}
       </p>
+    </div>
+  );
+}
+
+function RegimeBanner({ regime }: { regime: MacroRegime }) {
+  if (regime === "neutral") return null;
+  const isOff = regime === "risk-off";
+  return (
+    <div className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium border ${
+      isOff
+        ? "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-400"
+        : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-400"
+    }`}>
+      <span>{isOff ? "🔴" : "🟢"}</span>
+      <span className="font-bold uppercase">{regime}</span>
+      <span className="text-xs font-normal opacity-80">
+        {isOff
+          ? "Median ETH Δ7d < −5% — stable pools prioritised, sizing halved"
+          : "Median ETH Δ7d > +5% — higher IL tolerance, 1.5× Kelly sizing"}
+      </span>
     </div>
   );
 }

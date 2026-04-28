@@ -8,7 +8,7 @@
 
 import OpenAI from "openai";
 import type { RankedOpportunity } from "../ReporterAgent";
-import type { MockPosition, PortfolioSummary } from "../PortfolioManager";
+import type { MockPosition, PortfolioSummary, MacroRegime } from "../PortfolioManager";
 import type { ZeroGMemory, MarketConditions, DecisionRecord } from "../storage/ZeroGMemory";
 import { gasBreakEvenDays } from "../config/chains";
 
@@ -194,9 +194,12 @@ function buildContext(
     ? `TOKEN EXPOSURE (40% limit): ${expEntries.join("  ")}`
     : "TOKEN EXPOSURE: none yet";
 
+  const regimeLabel = fmtRegime(summary.regime);
+
   return [
     `Time: ${new Date().toUTCString()}`,
     ``,
+    `MACRO REGIME: ${regimeLabel}`,
     `PORTFOLIO: cash=$${summary.cashUsd.toFixed(0)} invested=$${summary.investedUsd.toFixed(0)} totalCapital=$${summary.totalCapitalUsd} positions=${summary.openPositions}/4 unrealizedPnL=$${summary.unrealizedPnlUsd.toFixed(2)} realizedPnL=$${summary.realizedPnlUsd.toFixed(2)}`,
     exposureLine,
     ``,
@@ -256,6 +259,14 @@ function fmtHours(h: number): string {
   if (h < 1)  return `${Math.round(h * 60)}m`;
   if (h < 24) return `${h.toFixed(1)}h`;
   return `${(h / 24).toFixed(1)}d`;
+}
+
+function fmtRegime(regime: MacroRegime | undefined): string {
+  switch (regime) {
+    case "risk-off": return "RISK-OFF 🔴 (median ETH Δ7d < -5%) — prefer stable pools, sizing halved";
+    case "risk-on":  return "RISK-ON 🟢 (median ETH Δ7d > +5%) — higher IL tolerance, 1.5× Kelly";
+    default:         return "NEUTRAL ⚪ (median ETH Δ7d within ±5%)";
+  }
 }
 
 function fmtSimilar(records: DecisionRecord[]): string {
@@ -336,6 +347,7 @@ function buildCritiqueContext(
   const simLines = fmtSimilar(similar);
 
   return [
+    `MACRO REGIME: ${fmtRegime(summary.regime)}`,
     `SEEKER PROPOSES: ${decision.action.toUpperCase()} ${opp.pair} on ${opp.chainName}`,
     `Seeker reasoning: ${decision.reasoning}`,
     ``,

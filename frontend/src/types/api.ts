@@ -152,6 +152,8 @@ export interface DecisionCycle {
   rawTokens:  number;
 }
 
+export type MacroRegime = "risk-off" | "neutral" | "risk-on";
+
 export interface PortfolioSummary {
   totalCapitalUsd:        number;
   cashUsd:                number;
@@ -169,6 +171,7 @@ export interface PortfolioSummary {
   lastDecision:           AgentDecision | null;
   lastDecisionAt:         number | null;
   tokenExposure:          Record<string, number>;
+  regime:                 MacroRegime;
 }
 
 export interface YieldsResponse          { count: number; data: RankedOpportunity[] }
