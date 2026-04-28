@@ -6,7 +6,10 @@ import { YieldTable }         from "../components/YieldTable";
 import { PositionsTable }     from "../components/PositionsTable";
 import { ReflectionSidebar }  from "../components/ReflectionSidebar";
 import { DecisionFeed }       from "../components/DecisionFeed";
-import type { RankedOpportunity, PortfolioSummary, MockPosition, MacroRegime } from "../types/api";
+import type {
+  RankedOpportunity, PortfolioSummary, MockPosition,
+  MacroRegime, RiskBudgetState,
+} from "../types/api";
 
 const API = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:3001";
 
@@ -32,13 +35,10 @@ export default function Dashboard() {
         fetch(`${API}/portfolio`),
         fetch(`${API}/portfolio/positions`),
       ]);
-
       if (!yRes.ok) throw new Error(`Agent API returned ${yRes.status}`);
       setYields((await yRes.json()).data ?? []);
-
       if (pRes.ok)   setPortfolio(await pRes.json());
       if (posRes.ok) setPositions((await posRes.json()).data ?? []);
-
       setLastScan(new Date().toLocaleTimeString());
     } catch (e: any) {
       setError(e.message ?? "Failed to reach agent API");
@@ -55,14 +55,12 @@ export default function Dashboard() {
 
   return (
     <>
-      <Head>
-        <title>EarnYld — Yield Hunter</title>
-      </Head>
+      <Head><title>EarnYld — Yield Hunter</title></Head>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 flex flex-col">
 
         {/* ── Header ── */}
         <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex-shrink-0">
-          <div className="max-w-screen-2xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="w-full px-4 py-4 flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold tracking-tight">🌾 EarnYld</h1>
               <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -71,10 +69,8 @@ export default function Dashboard() {
             </div>
             <div className="flex items-center gap-4 text-sm">
               {lastScan && <span className="text-gray-400">Updated {lastScan}</span>}
-              <button
-                onClick={fetchData} disabled={loading}
-                className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-              >
+              <button onClick={fetchData} disabled={loading}
+                className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors">
                 {loading ? "Scanning…" : "Refresh"}
               </button>
               <a href="/docs"
@@ -86,12 +82,11 @@ export default function Dashboard() {
         </header>
 
         {/* ── Body: main + sidebar ── */}
-        <div className="flex-1 flex max-w-screen-2xl mx-auto w-full px-4 py-6 gap-6 min-h-0">
+        <div className="flex-1 flex w-full px-4 py-6 gap-6 min-h-0">
 
           {/* ── Main column ── */}
           <div className="flex-1 min-w-0 flex flex-col gap-5">
 
-            {/* Error */}
             {error && (
               <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-3 text-sm text-red-700 dark:text-red-400">
                 ⚠ {error} — is the agent running on port 3001?
@@ -117,6 +112,9 @@ export default function Dashboard() {
                 <LastDecisionBadge portfolio={portfolio} />
               </div>
             )}
+
+            {/* Risk budget */}
+            {portfolio?.riskBudget && <RiskBudgetPanel budget={portfolio.riskBudget} />}
 
             {/* Regime banner */}
             {portfolio && <RegimeBanner regime={portfolio.regime} />}
@@ -161,30 +159,25 @@ export default function Dashboard() {
           {/* ── Right sidebar ── */}
           <div className="hidden lg:flex flex-col w-72 xl:w-80 flex-shrink-0">
             <div className="sticky top-6 flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 h-[calc(100vh-7rem)] overflow-hidden">
-              {/* Sidebar tab strip */}
               <div className="flex gap-1 mb-3 flex-shrink-0 border-b border-gray-200 dark:border-gray-700 pb-2">
-                <button
-                  onClick={() => setSidePanel("decisions")}
+                <button onClick={() => setSidePanel("decisions")}
                   className={`flex-1 text-xs py-1 rounded-t font-medium transition-colors ${
                     sidePanel === "decisions"
                       ? "text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-600 dark:border-indigo-400"
                       : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-                  }`}
-                >
+                  }`}>
                   Decisions
                 </button>
-                <button
-                  onClick={() => setSidePanel("reflections")}
+                <button onClick={() => setSidePanel("reflections")}
                   className={`flex-1 text-xs py-1 rounded-t font-medium transition-colors ${
                     sidePanel === "reflections"
                       ? "text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-600 dark:border-indigo-400"
                       : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
-                  }`}
-                >
+                  }`}>
                   Reflections
                 </button>
               </div>
-              {sidePanel === "decisions"  && <DecisionFeed      apiUrl={API} />}
+              {sidePanel === "decisions"   && <DecisionFeed      apiUrl={API} />}
               {sidePanel === "reflections" && <ReflectionSidebar apiUrl={API} />}
             </div>
           </div>
@@ -238,9 +231,93 @@ function RegimeBanner({ regime }: { regime: MacroRegime }) {
       <span className="font-bold uppercase">{regime}</span>
       <span className="text-xs font-normal opacity-80">
         {isOff
-          ? "Median ETH Δ7d < −5% — stable pools prioritised, sizing halved"
-          : "Median ETH Δ7d > +5% — higher IL tolerance, 1.5× Kelly sizing"}
+          ? "Median ETH Δ7d < −5% — stable pools prioritised, sizing halved"
+          : "Median ETH Δ7d > +5% — higher IL tolerance, 1.5× Kelly sizing"}
       </span>
+    </div>
+  );
+}
+
+function RiskBudgetPanel({ budget }: { budget: RiskBudgetState }) {
+  const hasViolations = budget.violations.length > 0 || !budget.cashOk;
+  return (
+    <div className={`rounded-xl border px-4 py-3 ${
+      hasViolations
+        ? "border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/10"
+        : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+    }`}>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+          Risk Budget
+        </span>
+        {hasViolations && (
+          <span className="text-xs font-medium text-red-600 dark:text-red-400">
+            ⚠ {budget.violations.length} violation{budget.violations.length !== 1 ? "s" : ""}
+          </span>
+        )}
+        {!hasViolations && budget.canOpenNew && (
+          <span className="text-xs text-emerald-600 dark:text-emerald-400">All clear — new entry allowed</span>
+        )}
+      </div>
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+        {budget.dimensions.map(dim => (
+          <BudgetGauge key={dim.id}
+            label={dim.label} usedPct={dim.usedPct} limitPct={dim.limitPct}
+            ok={dim.ok} topItem={dim.topItem} />
+        ))}
+        <BudgetGaugeInverted
+          label="Cash Buffer" valuePct={budget.cashBufferPct} minPct={10} ok={budget.cashOk} />
+      </div>
+    </div>
+  );
+}
+
+function BudgetGauge({ label, usedPct, limitPct, ok, topItem }: {
+  label: string; usedPct: number; limitPct: number; ok: boolean; topItem?: string;
+}) {
+  const fillPct  = Math.min(usedPct / limitPct * 100, 100);
+  const barColor = !ok ? "bg-red-500" : fillPct > 80 ? "bg-yellow-400" : "bg-emerald-500";
+  const textColor = !ok ? "text-red-600 dark:text-red-400" : "text-gray-700 dark:text-gray-200";
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-gray-500 dark:text-gray-400 truncate">{label}</span>
+        <span className={`text-xs font-mono font-semibold tabular-nums ${textColor}`}>
+          {usedPct.toFixed(0)}%{!ok && <span className="ml-0.5">✗</span>}
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${fillPct}%` }} />
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-gray-400 truncate" title={topItem}>{topItem ?? "—"}</span>
+        <span className="text-xs text-gray-400">/{limitPct}%</span>
+      </div>
+    </div>
+  );
+}
+
+function BudgetGaugeInverted({ label, valuePct, minPct, ok }: {
+  label: string; valuePct: number; minPct: number; ok: boolean;
+}) {
+  const fillPct  = Math.min(valuePct, 100);
+  const barColor = !ok ? "bg-red-500" : valuePct < minPct * 2 ? "bg-yellow-400" : "bg-emerald-500";
+  const textColor = !ok ? "text-red-600 dark:text-red-400" : "text-gray-700 dark:text-gray-200";
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-gray-500 dark:text-gray-400 truncate">{label}</span>
+        <span className={`text-xs font-mono font-semibold tabular-nums ${textColor}`}>
+          {valuePct.toFixed(0)}%{!ok && <span className="ml-0.5">✗</span>}
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${fillPct}%` }} />
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-gray-400">avail.</span>
+        <span className="text-xs text-gray-400">min {minPct}%</span>
+      </div>
     </div>
   );
 }
@@ -257,7 +334,6 @@ function LastDecisionBadge({ portfolio }: { portfolio: PortfolioSummary }) {
   const d   = portfolio.lastDecision;
   const at  = portfolio.lastDecisionAt;
   const pct = d ? Math.round(d.confidence * 100) : null;
-
   return (
     <div className="rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 px-4 py-3 col-span-2 sm:col-span-1">
       <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
@@ -270,9 +346,7 @@ function LastDecisionBadge({ portfolio }: { portfolio: PortfolioSummary }) {
       ) : (
         <div>
           <div className="flex items-center gap-2">
-            <span className={`text-sm font-bold uppercase ${ACTION_COLORS[d.action] ?? ""}`}>
-              {d.action}
-            </span>
+            <span className={`text-sm font-bold uppercase ${ACTION_COLORS[d.action] ?? ""}`}>{d.action}</span>
             {pct !== null && (
               <span className={`text-xs font-medium ${pct >= 75 ? "text-green-600 dark:text-green-400" : "text-amber-500"}`}>
                 {pct}%

@@ -6,6 +6,12 @@ import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
 import { SlippageGuard } from "./calculator/SlippageGuard";
 import { computePairRAR, type RARResult } from "./calculator/VolatilityCalculator";
 import { computeLiquidityQuality, lqRankFactor, rankFactor } from "./calculator/LiquidityQualityCalculator";
+import { TokenRiskAssessor, type PoolRiskResult } from "./calculator/TokenRiskAssessor";
+import { StablecoinRiskAssessor, type StablecoinRiskResult } from "./calculator/StablecoinRiskAssessor";
+import { computeCapitalEfficiency } from "./calculator/CapitalEfficiencyCalculator";
+import { detectAdverseSelection, type AdverseSelectionResult } from "./calculator/AdverseSelectionDetector";
+import { runStressTest, type StressTestResult } from "./calculator/ScenarioStressTester";
+import { computeScorecard, type DecisionScorecard } from "./calculator/DecisionScorecard";
 import { APYHistoryStore } from "./storage/APYHistoryStore";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
 import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
@@ -72,6 +78,51 @@ export interface RankedOpportunity {
    * Defaults to 1.0 until 6h of history are collected.
    */
   apyPersistence: number;
+  /**
+   * GoPlus / heuristic token safety assessment.
+   * null = not yet checked (enriched async after RAR).
+   * blockEntry=true means the agent will NOT enter this pool.
+   */
+  tokenRisk:        PoolRiskResult | null;
+  /**
+   * Six-dimension stablecoin risk (peg, imbalance, issuer, bridge, chain, depeg vol).
+   * null = no stablecoins in this pool, or assessment not yet complete.
+   * blockEntry=true means a stablecoin is depegged > 5%.
+   */
+  stablecoinRisk:   StablecoinRiskResult | null;
+  // ── Capital efficiency (concentrated LP) ─────────────────────────────────
+  /** Fraction of 7d hourly prices within ±2σ_7d of current price (0–1). */
+  timeInRangePct:       number;
+  /** sqrt(min(liveAPY, refAPY) / max(liveAPY, refAPY)) — fee consistency (0–1). */
+  feeCaptureEfficiency: number;
+  /** timeInRangePct × feeCaptureEfficiency (0–1). */
+  capitalUtilization:   number;
+  /** netAPY × capitalUtilization — expected yield on deployed capital. */
+  effectiveNetAPY:      number;
+  /** ±% range used to compute TiR (= 2σ of 7-day price distribution). */
+  halfRangePct:         number;
+  // ── Adverse selection ─────────────────────────────────────────────────────
+  /**
+   * Detects toxic LP flow: fees paid by informed directional traders.
+   * Four sub-signals: feeVsPriceMove, volumeDuringLargeMoves,
+   * postTradePriceDrift, volatilityAfterVolumeSpikes.
+   * null = not yet computed (async after enrichRAR).
+   */
+  adverseSelection:     AdverseSelectionResult | null;
+  /**
+   * Eight pre-entry stress scenarios: token −5/10/20%, vol×2, volume−50%,
+   * APY mean-reverts, gas×5, stable depeg 50bps.
+   * Ranked worst-first; downsideScore 0–100 for column sorting.
+   * null = not yet computed (sync, runs after enrichRAR).
+   */
+  stressTest:           StressTestResult | null;
+  /**
+   * 8-dimension decision scorecard (yield, IL, liquidity, volatility,
+   * tokenRisk, gas, correlation, regime) plus composite and allocationPct.
+   * Standalone version: correlation=50, regime=75 until PortfolioManager
+   * enriches with actual portfolio state via enrichWithPortfolio().
+   */
+  scorecard:            DecisionScorecard | null;
   lastUpdated:   number;
 }
 
@@ -80,6 +131,8 @@ export class ReporterAgent {
   private slippage   = new SlippageGuard();
   private history    = new ExecutionHistory();
   private apyHistory = new APYHistoryStore();
+  private tokenRisk  = new TokenRiskAssessor();
+  private stableRisk = new StablecoinRiskAssessor();
   private latest:    RankedOpportunity[] = [];
   private running    = false;
   private scanCount  = 0;
@@ -122,10 +175,15 @@ export class ReporterAgent {
     // Prune old history rows every 100 scans (~100 min at default interval)
     if (++this.scanCount % 100 === 0) this.apyHistory.prune();
 
-    // Compute RAR for top N in background — re-sorts with full data when done
-    this.enrichRAR(ranked).then(() => {
-      console.log(`[Reporter] RAR + persistence computed for ${ranked.length} pools`);
-    });
+    // Compute RAR, then token risk + stablecoin risk in parallel — all in background
+    this.enrichRAR(ranked)
+      .then(() => Promise.all([
+        this.enrichTokenRisk(ranked),
+        this.enrichStablecoinRisk(ranked),
+      ]))
+      .then(() => {
+        console.log(`[Reporter] RAR + token risk + stable risk enriched for ${ranked.length} pools`);
+      });
 
     console.log(`[Reporter] ${pools.length} pools → top ${ranked.length} (${Date.now() - t0}ms)`);
     this.printTable(ranked.slice(0, 10));
@@ -180,6 +238,16 @@ export class ReporterAgent {
           liquidityQuality:     prev?.liquidityQuality     ?? lq.score,
           medianAPY7d:          prev?.medianAPY7d          ?? 0,
           apyPersistence:       prev?.apyPersistence       ?? 1.0,
+          tokenRisk:            prev?.tokenRisk            ?? null,
+          stablecoinRisk:       prev?.stablecoinRisk       ?? null,
+          timeInRangePct:       prev?.timeInRangePct       ?? 0,
+          feeCaptureEfficiency: prev?.feeCaptureEfficiency ?? 0,
+          capitalUtilization:   prev?.capitalUtilization   ?? 0,
+          effectiveNetAPY:      prev?.effectiveNetAPY      ?? displayAPY,
+          halfRangePct:         prev?.halfRangePct         ?? 0,
+          adverseSelection:     prev?.adverseSelection     ?? null,
+          stressTest:           prev?.stressTest           ?? null,
+          scorecard:            prev?.scorecard            ?? null,
           lastUpdated:  p.lastUpdated,
           // stash addresses for RAR calc
           _token0Address: p.poolKey.currency0,
@@ -229,14 +297,80 @@ export class ReporterAgent {
           opp.liveAPY, opp.referenceAPY, opp.apySource,
           opp.vol7d,
         ).score;
+        // Capital efficiency and adverse selection — run in parallel (both hit price cache)
+        const [ce, adv] = await Promise.all([
+          computeCapitalEfficiency({
+            chainId:       opp.chainId,
+            token0Address: r._token0Address,
+            token0Symbol:  r._token0Symbol,
+            token1Address: r._token1Address,
+            token1Symbol:  r._token1Symbol,
+            vol7d:         opp.vol7d,
+            liveAPY:       opp.liveAPY,
+            referenceAPY:  opp.referenceAPY,
+            tvlUsd:        opp.tvlUsd,
+            volume24hUsd:  opp.volume24hUsd,
+            netAPY:        opp.netAPY,
+          }),
+          detectAdverseSelection({
+            chainId:            opp.chainId,
+            token0Address:      r._token0Address,
+            token0Symbol:       r._token0Symbol,
+            token1Address:      r._token1Address,
+            token1Symbol:       r._token1Symbol,
+            liveAPY:            opp.liveAPY,
+            referenceAPY:       opp.referenceAPY,
+            vol24h:             opp.vol24h,
+            vol7d:              opp.vol7d,
+            tvlUsd:             opp.tvlUsd,
+            volume24hUsd:       opp.volume24hUsd,
+            pairPriceChange24h: opp.pairPriceChange24h,
+          }),
+        ]);
+        opp.timeInRangePct       = ce.timeInRangePct;
+        opp.feeCaptureEfficiency = ce.feeCaptureEfficiency;
+        opp.capitalUtilization   = ce.capitalUtilization;
+        opp.effectiveNetAPY      = ce.effectiveNetAPY;
+        opp.halfRangePct         = ce.halfRangePct;
+        opp.adverseSelection     = adv;
+        if (adv.quality === "high" || adv.quality === "elevated") {
+          console.log(`[Reporter] Adverse selection ${adv.quality}: ${opp.pair} score=${adv.score} — ${adv.flags[0] ?? ""}`);
+        }
+        // Stress test: synchronous — all inputs are already available
+        const isStablePool = !!(opp.stablecoinRisk?.isStablePool);
+        opp.stressTest = runStressTest({  // eslint-disable-line no-case-declarations
+          chainId:              opp.chainId,
+          vol7d:                opp.vol7d,
+          displayAPY:           opp.displayAPY,
+          medianAPY7d:          opp.medianAPY7d,
+          apyPersistence:       opp.apyPersistence,
+          timeInRangePct:       opp.timeInRangePct,
+          feeCaptureEfficiency: opp.feeCaptureEfficiency,
+          expectedIL:           opp.expectedIL,
+          netAPY:               opp.netAPY,
+          effectiveNetAPY:      opp.effectiveNetAPY,
+          tvlUsd:               opp.tvlUsd,
+          volume24hUsd:         opp.volume24hUsd,
+          isStablePool,
+        });
+        // Scorecard: standalone (correlation=50, regime=75 until PM enriches)
+        opp.scorecard = computeScorecard(opp);
       })
     );
-    // Re-sort and re-rank: LQ + persistence adjusted RAR (or netAPY fallback)
+    // Re-sort: LQ × persistence × capitalUtilization × (1 − advPenalty) × (1 − stressPenalty)
+    // advPenalty:    score > 50 discounts up to 30% at score=100
+    // stressPenalty: downsideScore > 30 discounts up to 25% at score=100
     ranked.sort((a, b) => {
-      const fa = rankFactor(a.liquidityQuality, a.apyPersistence);
-      const fb = rankFactor(b.liquidityQuality, b.apyPersistence);
-      const sa = (a.rar7d > 0 ? a.rar7d : a.netAPY / 50) * fa;
-      const sb = (b.rar7d > 0 ? b.rar7d : b.netAPY / 50) * fb;
+      const fa    = rankFactor(a.liquidityQuality, a.apyPersistence);
+      const fb    = rankFactor(b.liquidityQuality, b.apyPersistence);
+      const cua   = a.capitalUtilization > 0 ? a.capitalUtilization : 1.0;
+      const cub   = b.capitalUtilization > 0 ? b.capitalUtilization : 1.0;
+      const adva  = 1 - Math.max(0, (a.adverseSelection?.score ?? 0) - 50) / 100 * 0.3;
+      const advb  = 1 - Math.max(0, (b.adverseSelection?.score ?? 0) - 50) / 100 * 0.3;
+      const stra  = 1 - Math.max(0, (a.stressTest?.downsideScore ?? 0) - 30) / 70 * 0.25;
+      const strb  = 1 - Math.max(0, (b.stressTest?.downsideScore ?? 0) - 30) / 70 * 0.25;
+      const sa    = (a.rar7d > 0 ? a.rar7d * cua : a.effectiveNetAPY / 50) * fa * adva * stra;
+      const sb    = (b.rar7d > 0 ? b.rar7d * cub : b.effectiveNetAPY / 50) * fb * advb * strb;
       return sb - sa;
     });
     ranked.forEach((o, i) => { o.rank = i + 1; });
@@ -257,21 +391,83 @@ export class ReporterAgent {
     }
   }
 
+  // ─── Token risk enrichment ───────────────────────────────────────────────
+  // Runs after enrichRAR (sequential, not concurrent) so token0/1 prices are current.
+  private async enrichTokenRisk(ranked: RankedOpportunity[]): Promise<void> {
+    await Promise.allSettled(
+      ranked.map(async (opp) => {
+        const r = opp as any;
+        if (!r._token0Address) return;
+        try {
+          opp.tokenRisk = await this.tokenRisk.assessPool(
+            r._token0Address, r._token0Symbol,
+            r._token1Address, r._token1Symbol,
+            opp.chainId,
+            opp.token0Price,
+            opp.token1Price,
+          );
+          if (opp.tokenRisk.blockEntry) {
+            console.log(`[Reporter] Token risk BLOCK: ${opp.pair} on ${opp.chainName} — ${opp.tokenRisk.flags.join("; ")}`);
+          } else if (opp.tokenRisk.poolRiskScore > 40) {
+            console.log(`[Reporter] Token risk advisory: ${opp.pair} score=${opp.tokenRisk.poolRiskScore} — ${opp.tokenRisk.flags.join("; ")}`);
+          }
+          // Refresh scorecard tokenRisk dimension now that real data is available
+          if (opp.scorecard) opp.scorecard = computeScorecard(opp);
+        } catch {
+          // leave tokenRisk unchanged
+        }
+      })
+    );
+    // Prune expired cache entries once per scan cycle
+    this.tokenRisk.clearExpired();
+  }
+
+  // ─── Stablecoin risk enrichment ──────────────────────────────────────────
+  // Runs in parallel with enrichTokenRisk (both are independent post-RAR steps).
+  private async enrichStablecoinRisk(ranked: RankedOpportunity[]): Promise<void> {
+    await Promise.allSettled(
+      ranked.map(async (opp) => {
+        const r = opp as any;
+        if (!r._token0Address) return;
+        try {
+          const result = await this.stableRisk.assessPool(
+            r._token0Address, r._token0Symbol,
+            r._token1Address, r._token1Symbol,
+            opp.chainId,
+            opp.token0Price,
+            opp.token1Price,
+          );
+          opp.stablecoinRisk = result; // null if no stablecoins in pool
+          if (result?.blockEntry) {
+            console.log(`[Reporter] Stable risk BLOCK: ${opp.pair} — ${result.flags[0]}`);
+          } else if (result && result.compositeScore > 40) {
+            console.log(`[Reporter] Stable risk advisory: ${opp.pair} score=${result.compositeScore} — ${result.flags.join("; ")}`);
+          }
+        } catch {
+          // leave stablecoinRisk unchanged
+        }
+      })
+    );
+  }
+
   // ─── Console table ────────────────────────────────────────────────────────
   private printTable(opps: RankedOpportunity[]): void {
     console.log(
-      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"Med7d".padEnd(8)} ${"Persist".padEnd(8)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} ${"LQ".padEnd(5)} Risk`
+      `${"#".padEnd(4)} ${"Chain".padEnd(17)} ${"Pair".padEnd(13)} ${"APY".padEnd(9)} ${"Med7d".padEnd(8)} ${"Persist".padEnd(8)} ${"RAR-7d".padEnd(9)} ${"TVL".padEnd(11)} ${"LQ".padEnd(5)} ${"TRisk".padEnd(8)} Risk`
     );
-    console.log("─".repeat(104));
+    console.log("─".repeat(114));
     for (const o of opps) {
-      const rar7d   = o.rar7d    > 0 ? o.rar7d.toFixed(2)           : "…";
-      const med     = o.medianAPY7d > 0 ? formatAPY(o.medianAPY7d)  : "…";
+      const rar7d   = o.rar7d       > 0 ? o.rar7d.toFixed(2)          : "…";
+      const med     = o.medianAPY7d > 0 ? formatAPY(o.medianAPY7d)    : "…";
       const persist = o.medianAPY7d > 0 ? (o.apyPersistence * 100).toFixed(0) + "%" : "…";
       const lq      = o.liquidityQuality > 0 ? String(o.liquidityQuality) : "…";
+      const tr      = o.tokenRisk
+        ? (o.tokenRisk.blockEntry ? "BLOCK" : String(o.tokenRisk.poolRiskScore))
+        : "…";
       console.log(
         `${String(o.rank).padEnd(4)} ${o.chainName.padEnd(17)} ${o.pair.padEnd(13)} ` +
         `${formatAPY(o.displayAPY).padEnd(9)} ${med.padEnd(8)} ${persist.padEnd(8)} ` +
-        `${rar7d.padEnd(9)} $${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${lq.padEnd(5)} ${o.risk}`
+        `${rar7d.padEnd(9)} $${(o.tvlUsd / 1000).toFixed(0)}K`.padEnd(11) + ` ${lq.padEnd(5)} ${tr.padEnd(8)} ${o.risk}`
       );
     }
   }

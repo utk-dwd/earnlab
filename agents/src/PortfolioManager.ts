@@ -3,9 +3,21 @@ import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
-import { TICK_SPACINGS, gasBreakEvenDays } from "./config/chains";
+import { TICK_SPACINGS, gasBreakEvenDays, GAS_COST_USD } from "./config/chains";
 import type { FeeTier } from "./config/chains";
 import { rankFactor } from "./calculator/LiquidityQualityCalculator";
+import {
+  RISK_BUDGET,
+  computeRiskBudgetState,
+  checkRiskBudget,
+  rbPairTokens,
+  rbIssuerOf,
+  rbIsVolatile,
+} from "./calculator/RiskBudget";
+import type { RiskBudgetState } from "./calculator/RiskBudget";
+import { enrichWithPortfolio } from "./calculator/DecisionScorecard";
+import { optimizePortfolio } from "./calculator/PortfolioOptimizer";
+import type { OptimizationResult } from "./calculator/PortfolioOptimizer";
 
 // ─── Regime ───────────────────────────────────────────────────────────────────
 export type MacroRegime = "risk-off" | "neutral" | "risk-on";
@@ -26,15 +38,16 @@ function isStablePool(pair: string): boolean {
 const INITIAL_CAPITAL_USD = 10_000;
 const MAX_POSITION_PCT    = 0.30;   // max 30% of capital per pair
 const TARGET_POSITIONS    = 4;      // aim for this many concurrent positions
-const REBALANCE_THRESHOLD = 0.30;   // candidate must have 30% better RAR7d to trigger
-const MIN_HOLD_HOURS      = 24;     // never rebalance a position younger than this
-const MAX_BREAKEVEN_DAYS  = 7;      // only rebalance if fee recovers within this many days
+const MIN_HOLD_HOURS         = 24;     // never rebalance a position younger than this
+const MAX_BREAKEVEN_DAYS     = 7;      // initial entry only: gas break-even must be ≤ this
+const HOLD_HORIZON_DAYS      = 30;     // projection horizon for switchBenefit calculation
+const MIN_SWITCH_BENEFIT_PCT = 0.005;  // switch benefit must exceed 0.5% of position value over horizon
+const GAS_COST_USD_FALLBACK  = 1.00;   // fallback gas cost for unlisted chains
 const ENTRY_FEE_PCT        = 0.001;  // 0.1% simulated swap cost to enter
 const EXIT_FEE_PCT         = 0.001;  // 0.1% simulated swap cost to exit
 const CHECK_INTERVAL_MS    = 5 * 60_000;
 const CONFIDENCE_THRESHOLD    = 0.75;
 const DECISION_HISTORY_MAX    = 50;
-const MAX_TOKEN_EXPOSURE_PCT  = 0.40;  // max 40% of capital in any single underlying token
 
 // ─── Exit trigger thresholds ─────────────────────────────────────────────────
 const RAR_DETERIORATION_RATIO  = 0.50;  // exit if current RAR7d < entry × 0.5
@@ -115,6 +128,8 @@ export interface PortfolioSummary {
   lastDecisionAt:         number | null;
   tokenExposure:          Record<string, number>;  // normalised token → % of totalCapital
   regime:                 MacroRegime;
+  riskBudget:             RiskBudgetState;
+  portfolioOptimization:  OptimizationResult | null;
 }
 
 export type { AgentDecision, DecisionCycle };
@@ -130,12 +145,13 @@ export class PortfolioManager {
   private lastRebalance: number | null = null;
   private running        = false;
 
-  private memory:          ZeroGMemory;
-  private llm:             LLMClient | null = null;
-  private llmReady         = false;
-  private lastCycle:       DecisionCycle | null = null;
-  private decisionHistory: DecisionCycle[] = [];
-  private regime:          MacroRegime = "neutral";
+  private memory:             ZeroGMemory;
+  private llm:                LLMClient | null = null;
+  private llmReady            = false;
+  private lastCycle:          DecisionCycle | null = null;
+  private decisionHistory:    DecisionCycle[] = [];
+  private regime:             MacroRegime = "neutral";
+  private latestOptimization: OptimizationResult | null = null;
 
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
@@ -175,6 +191,15 @@ export class PortfolioManager {
       console.log(`[Portfolio] Regime changed: ${prev} → ${this.regime}`);
     }
     this.updateValues();
+
+    // Enrich scorecards with portfolio-aware correlation + regime, then run optimizer
+    this.enrichScorecards();
+    this.latestOptimization = optimizePortfolio(
+      this.reporter.getLatest(),
+      [...this.positions.values()],
+      this.cash,
+      this.regime,
+    );
 
     // Evaluate exit triggers every tick — updates alerts for UI and auto-exits when warranted
     this.evaluateExitTriggers();
@@ -264,6 +289,15 @@ export class PortfolioManager {
             }
             console.log(`[Portfolio] Critic approved rebalance into ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%)`);
           }
+          // Transaction-cost-aware hurdle: applies to LLM-driven rebalances too
+          if (worst && opp) {
+            const currentOpp = this.reporter.getLatest().find(o => o.poolId === worst.poolId);
+            const sw = switchBenefitCheck(worst, currentOpp, opp);
+            if (!sw.ok) {
+              console.log(`[Portfolio] LLM rebalance hold (switch hurdle): ${sw.log}`);
+              break;
+            }
+          }
           if (worst) this.toolClose(worst.poolId, `Rebalancing into ${d.pool}: ${d.reasoning}`);
           this.toolOpen(d.pool, d.reasoning, d.allocationPct, d);
         }
@@ -317,10 +351,10 @@ export class PortfolioManager {
       ? Math.min(allocationPct / 100, MAX_POSITION_PCT)
       : this.kellyAllocation(opp);
 
-    // Correlation guard: block if any token would exceed 40% of total capital
-    const guard = correlationGuardCheck(opp.pair, INITIAL_CAPITAL_USD * pct, this.openList());
-    if (!guard.ok) {
-      console.log(`[Portfolio] Correlation guard blocked ${opp.pair}: ${guard.blockedToken} ${guard.currentPct?.toFixed(1)}% + ${guard.addedPct?.toFixed(1)}% = ${guard.newPct?.toFixed(1)}% > ${(MAX_TOKEN_EXPOSURE_PCT * 100).toFixed(0)}%`);
+    // Risk budget: block if any portfolio-level constraint would be breached
+    const viols = checkRiskBudget(opp.pair, opp.chainName, INITIAL_CAPITAL_USD * pct, this.openList(), this.cash, INITIAL_CAPITAL_USD);
+    if (viols.length > 0) {
+      console.log(`[Portfolio] Risk budget blocked ${opp.pair}: ${viols.map(v => v.message).join(" | ")}`);
       return false;
     }
 
@@ -328,6 +362,18 @@ export class PortfolioManager {
     const beDays = gasBreakEvenDays(opp.chainId, INITIAL_CAPITAL_USD * pct, opp.displayAPY);
     if (beDays > MAX_BREAKEVEN_DAYS) {
       console.log(`[Portfolio] Gas break-even ${beDays.toFixed(1)}d > ${MAX_BREAKEVEN_DAYS}d — skip ${opp.pair} on ${opp.chainName}`);
+      return false;
+    }
+
+    // Token risk guard: block honeypots, balance-manipulable contracts, depegged stables
+    if (opp.tokenRisk?.blockEntry) {
+      console.log(`[Portfolio] Token risk BLOCK: ${opp.pair} — ${opp.tokenRisk.flags.join("; ")}`);
+      return false;
+    }
+
+    // Stablecoin depeg guard: block if any stablecoin is > 5% off peg
+    if (opp.stablecoinRisk?.blockEntry) {
+      console.log(`[Portfolio] Stable depeg BLOCK: ${opp.pair} — ${opp.stablecoinRisk.flags[0]}`);
       return false;
     }
 
@@ -353,6 +399,18 @@ export class PortfolioManager {
     return true;
   }
 
+  // ─── Portfolio-aware scorecard enrichment ────────────────────────────────
+  // Updates correlation + regime scores on all latest opportunities in-place
+  // so the API response always reflects the current portfolio state.
+  private enrichScorecards(): void {
+    const positions = [...this.positions.values()];
+    for (const opp of this.reporter.getLatest()) {
+      if (opp.scorecard) {
+        opp.scorecard = enrichWithPortfolio(opp.scorecard, opp, positions, this.regime);
+      }
+    }
+  }
+
   // ─── Kelly-inspired position sizing ─────────────────────────────────────
   // f* = (RAR − 1) / RAR, scaled to ¼ Kelly, capped at MAX_POSITION_PCT.
   // Regime multiplier: risk-off halves sizing; risk-on adds 50% (still capped).
@@ -373,35 +431,104 @@ export class PortfolioManager {
       return;
     }
 
-    // Greedy selection: iterate ranked candidates, skip any that would breach correlation limit
-    const selected:   RankedOpportunity[] = [];
-    const hypExposure = new Map<string, number>();  // provisional token → USD
+    // Greedy selection: iterate ranked candidates, skip any that would breach any budget limit.
+    // Uses provisional tracking maps so multi-position batches don't exceed any constraint.
+    const selected:     RankedOpportunity[] = [];
+    const hypTokenMap   = new Map<string, number>();  // token → provisional USD
+    const hypChainMap   = new Map<string, number>();  // chain → provisional USD
+    const hypIssuerMap  = new Map<string, number>();  // issuer → provisional USD
+    let   hypVolUsd     = 0;
+    let   hypCash       = this.cash;
 
     for (const c of candidates) {
       if (selected.length >= TARGET_POSITIONS) break;
-      const valueUsd = INITIAL_CAPITAL_USD * this.kellyAllocation(c);
-      const tokens   = extractTokens(c.pair);
+      const valueUsd  = INITIAL_CAPITAL_USD * this.kellyAllocation(c);
+      const [pt0, pt1] = rbPairTokens(c.pair);
+      const half      = valueUsd / 2;
+      const isVol     = rbIsVolatile(c.pair);
 
-      const blocked = tokens.find(t => {
-        const cur = hypExposure.get(t) ?? 0;
-        return (cur + valueUsd / 2) / INITIAL_CAPITAL_USD > MAX_TOKEN_EXPOSURE_PCT;
-      });
-      if (blocked) {
-        const curPct = ((hypExposure.get(blocked) ?? 0) / INITIAL_CAPITAL_USD * 100).toFixed(1);
-        console.log(`[Portfolio] Deploy: skip ${c.pair} — ${blocked} already at ${curPct}% (correlation limit)`);
-        continue;
-      }
-
+      // ── Gas break-even ──────────────────────────────────────────────────────
       const beDays = gasBreakEvenDays(c.chainId, valueUsd, c.displayAPY);
       if (beDays > MAX_BREAKEVEN_DAYS) {
         console.log(`[Portfolio] Deploy: skip ${c.pair} on ${c.chainName} — gas break-even ${beDays.toFixed(1)}d`);
         continue;
       }
 
-      selected.push(c);
-      for (const t of tokens) {
-        hypExposure.set(t, (hypExposure.get(t) ?? 0) + valueUsd / 2);
+      // ── Token / stable risk blocks ──────────────────────────────────────────
+      if (c.tokenRisk?.blockEntry) {
+        console.log(`[Portfolio] Deploy: token risk BLOCK ${c.pair} — ${c.tokenRisk.flags.join("; ")}`);
+        continue;
       }
+      if (c.stablecoinRisk?.blockEntry) {
+        console.log(`[Portfolio] Deploy: stable depeg BLOCK ${c.pair} — ${c.stablecoinRisk.flags[0]}`);
+        continue;
+      }
+
+      // ── Risk budget constraints ─────────────────────────────────────────────
+      let skipReason = "";
+
+      // Cash buffer (after this and all already-selected allocations)
+      if ((hypCash - valueUsd) / INITIAL_CAPITAL_USD * 100 < RISK_BUDGET.minCashBufferPct) {
+        skipReason = `cash buffer would fall to ${((hypCash - valueUsd) / INITIAL_CAPITAL_USD * 100).toFixed(0)}%`;
+      }
+
+      // Chain exposure
+      if (!skipReason) {
+        const after = ((hypChainMap.get(c.chainName) ?? 0) + valueUsd) / INITIAL_CAPITAL_USD * 100;
+        if (after > RISK_BUDGET.maxChainExposurePct)
+          skipReason = `${c.chainName} chain would reach ${after.toFixed(0)}% (max ${RISK_BUDGET.maxChainExposurePct}%)`;
+      }
+
+      // Token exposure
+      if (!skipReason) {
+        for (const t of [pt0, pt1]) {
+          const after = ((hypTokenMap.get(t) ?? 0) + half) / INITIAL_CAPITAL_USD * 100;
+          if (after > RISK_BUDGET.maxTokenExposurePct) {
+            skipReason = `${t} token would reach ${after.toFixed(0)}% (max ${RISK_BUDGET.maxTokenExposurePct}%)`;
+            break;
+          }
+        }
+      }
+
+      // Volatile pair exposure
+      if (!skipReason && isVol) {
+        const after = (hypVolUsd + valueUsd) / INITIAL_CAPITAL_USD * 100;
+        if (after > RISK_BUDGET.maxVolatilePairExposurePct)
+          skipReason = `volatile pairs would reach ${after.toFixed(0)}% (max ${RISK_BUDGET.maxVolatilePairExposurePct}%)`;
+      }
+
+      // Stablecoin issuer exposure
+      if (!skipReason) {
+        const seen = new Set<string>();
+        for (const t of [pt0, pt1]) {
+          const iss = rbIssuerOf(t);
+          if (iss && !seen.has(iss)) {
+            seen.add(iss);
+            const after = ((hypIssuerMap.get(iss) ?? 0) + half) / INITIAL_CAPITAL_USD * 100;
+            if (after > RISK_BUDGET.maxStablecoinIssuerExposurePct) {
+              skipReason = `${iss} issuer would reach ${after.toFixed(0)}% (max ${RISK_BUDGET.maxStablecoinIssuerExposurePct}%)`;
+              break;
+            }
+          }
+        }
+      }
+
+      if (skipReason) {
+        console.log(`[Portfolio] Deploy: skip ${c.pair} — ${skipReason}`);
+        continue;
+      }
+
+      // ── Accept candidate ────────────────────────────────────────────────────
+      selected.push(c);
+      for (const t of [pt0, pt1]) hypTokenMap.set(t, (hypTokenMap.get(t) ?? 0) + half);
+      hypChainMap.set(c.chainName, (hypChainMap.get(c.chainName) ?? 0) + valueUsd);
+      if (isVol) hypVolUsd += valueUsd;
+      const seen2 = new Set<string>();
+      for (const t of [pt0, pt1]) {
+        const iss = rbIssuerOf(t);
+        if (iss && !seen2.has(iss)) { seen2.add(iss); hypIssuerMap.set(iss, (hypIssuerMap.get(iss) ?? 0) + half); }
+      }
+      hypCash -= valueUsd;
     }
 
     if (selected.length === 0) {
@@ -435,37 +562,27 @@ export class PortfolioManager {
       if ((Date.now() - pos.entryTimestamp) / 3_600_000 < MIN_HOLD_HOURS) continue;
 
       const currentOpp = allOpps.find(o => o.poolId === pos.poolId);
-      const currentRAR = currentOpp?.rar7d    ?? pos.entryRAR7d;
-      const currentAPY = currentOpp?.displayAPY ?? pos.entryAPY;
-
-      const best = candidates.find(c => !inPortfolio.has(c.poolId));
+      const best       = candidates.find(c => !inPortfolio.has(c.poolId));
       if (!best) continue;
 
-      // Compare by RAR when available; fall back to APY-only comparison
-      const hasRAR = best.rar7d > 0 && currentRAR > 0;
-      if (hasRAR) {
-        if (best.rar7d <= currentRAR * (1 + REBALANCE_THRESHOLD)) continue;
-      } else {
-        if (best.displayAPY <= currentAPY * (1 + REBALANCE_THRESHOLD)) continue;
-      }
-
-      const cost        = pos.currentValueUsd * (ENTRY_FEE_PCT + EXIT_FEE_PCT);
-      const extraPerDay = pos.currentValueUsd * (best.displayAPY - currentAPY) / 100 / 365;
-      if (extraPerDay <= 0 || cost / extraPerDay > MAX_BREAKEVEN_DAYS) continue;
-
-      // Correlation guard: check exposure WITHOUT the position being exited
-      const openWithoutPos  = open.filter(p => p.poolId !== pos.poolId);
-      const newValue        = pos.currentValueUsd * (1 - EXIT_FEE_PCT);
-      const corrGuard       = correlationGuardCheck(best.pair, newValue, openWithoutPos);
-      if (!corrGuard.ok) {
-        console.log(`[Portfolio] Rebalance correlation guard: skip ${best.pair} — ${corrGuard.blockedToken} would reach ${corrGuard.newPct?.toFixed(1)}%`);
+      // Transaction-cost-aware switch benefit hurdle
+      const sw = switchBenefitCheck(pos, currentOpp, best);
+      if (!sw.ok) {
+        console.log(`[Portfolio] Rebalance hold: ${sw.log}`);
         continue;
       }
 
-      const rarLabel = hasRAR
-        ? `RAR ${best.rar7d.toFixed(2)} vs ${currentRAR.toFixed(2)}`
-        : `APY ${best.displayAPY.toFixed(1)}% vs ${currentAPY.toFixed(1)}%`;
-      const reason   = `Rebalanced: ${best.pair} ${rarLabel} (fee recovers in ${(cost / extraPerDay).toFixed(1)}d)`;
+      // Risk budget: check against portfolio WITHOUT the position being exited,
+      // funded by the exit proceeds (simulated cash = this.cash + simProceeds).
+      const openWithoutPos = open.filter(p => p.poolId !== pos.poolId);
+      const simProceeds    = pos.currentValueUsd * (1 - EXIT_FEE_PCT);
+      const budgetViols    = checkRiskBudget(best.pair, best.chainName, simProceeds, openWithoutPos, this.cash + simProceeds, INITIAL_CAPITAL_USD);
+      if (budgetViols.length > 0) {
+        console.log(`[Portfolio] Rebalance budget: skip ${best.pair} — ${budgetViols.map(v => v.message).join(" | ")}`);
+        continue;
+      }
+
+      const reason   = `Rebalanced: ${sw.log}`;
       const proceeds = this.exit(pos, reason);
       this.enter(best, proceeds, pos.allocationPct, `Rebalanced from ${pos.pair}`);
       this.lastRebalance = Date.now();
@@ -473,7 +590,7 @@ export class PortfolioManager {
       inPortfolio.delete(pos.poolId);
       inPortfolio.add(best.poolId);
 
-      console.log(`[Portfolio] Rebalanced ${pos.pair} → ${best.pair}`);
+      console.log(`[Portfolio] Rebalanced ${pos.pair} → ${best.pair}: benefit=$${sw.benefit.toFixed(2)} hurdle=$${sw.hurdle.toFixed(2)}`);
     }
   }
 
@@ -681,7 +798,7 @@ export class PortfolioManager {
   // Risk-off < -5%, neutral -5%–+5%, risk-on > +5%.
   private detectRegime(): MacroRegime {
     const ethPairs = this.reporter.getLatest()
-      .filter(o => extractTokens(o.pair).includes("ETH"));
+      .filter(o => rbPairTokens(o.pair).includes("ETH"));
     if (ethPairs.length === 0) return "neutral";
 
     const changes = ethPairs
@@ -739,6 +856,8 @@ export class PortfolioManager {
       lastDecisionAt:         this.lastCycle?.timestamp ?? null,
       tokenExposure,
       regime:                 this.regime,
+      riskBudget:             computeRiskBudgetState([...this.positions.values()], this.cash, INITIAL_CAPITAL_USD),
+      portfolioOptimization:  this.latestOptimization,
     };
   }
 
@@ -749,6 +868,10 @@ export class PortfolioManager {
 
   getTrades(): PortfolioTrade[] {
     return [...this.trades];
+  }
+
+  getOptimization(): OptimizationResult | null {
+    return this.latestOptimization;
   }
 
   getDecisionHistory(limit = 20): DecisionCycle[] {
@@ -776,83 +899,77 @@ function computeTickRange(opp: RankedOpportunity): {
   return { tickLower: -halfTicks, tickUpper: halfTicks, halfRangePct };
 }
 
-// ─── Correlation guard helpers ────────────────────────────────────────────────
-// Normalized token names for correlation purposes.
-// WETH / cbETH / wstETH / rETH are all ETH exposure; WBTC is BTC exposure.
-const TOKEN_EQUIVALENTS: Record<string, string> = {
-  WETH:   "ETH",
-  CBETH:  "ETH",
-  WSTETH: "ETH",
-  RETH:   "ETH",
-  EZETH:  "ETH",
-  WEETH:  "ETH",
-  WBTC:   "BTC",
-};
-
-/** Split a pair string ("WETH/USDC") into normalised token symbols (["ETH", "USDC"]). */
-function extractTokens(pair: string): string[] {
-  return pair.split("/").map(s => {
-    const u = s.trim().toUpperCase();
-    return TOKEN_EQUIVALENTS[u] ?? u;
-  });
-}
+// ─── Token exposure map (used only for PortfolioSummary.tokenExposure) ────────
 
 /** Sum each token's USD exposure across open positions (50/50 split per position). */
 function tokenExposureMap(positions: MockPosition[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const pos of positions) {
     const half = pos.currentValueUsd / 2;
-    for (const token of extractTokens(pos.pair)) {
+    for (const token of rbPairTokens(pos.pair)) {
       map.set(token, (map.get(token) ?? 0) + half);
     }
   }
   return map;
 }
 
-interface CorrelationGuardResult {
-  ok:           boolean;
-  blockedToken?: string;
-  currentPct?:  number;
-  addedPct?:    number;
-  newPct?:      number;
+// ─── Switch benefit check ────────────────────────────────────────────────────
+// Computes the net dollar benefit of moving from `pos` to `best` over HOLD_HORIZON_DAYS.
+// Returns ok=false when the projected gain doesn't clear the minimum hurdle after
+// accounting for exit gas, entry gas, and round-trip swap slippage.
+//
+// Uses effectiveNetAPY (= netAPY × capitalUtilization) so out-of-range risk is priced in.
+// Falls back to netAPY when capital efficiency hasn't been computed yet (early cycles).
+interface SwitchCheck {
+  ok:      boolean;
+  benefit: number;  // USD projected gain over horizon, after all costs
+  hurdle:  number;  // USD minimum benefit required
+  log:     string;  // single-line label for console output
 }
 
-/**
- * Returns { ok: false } if opening a position in `pair` with `newValueUsd`
- * would push any single token above MAX_TOKEN_EXPOSURE_PCT of total capital.
- */
-function correlationGuardCheck(
-  pair:          string,
-  newValueUsd:   number,
-  openPositions: MockPosition[],
-): CorrelationGuardResult {
-  const exposure = tokenExposureMap(openPositions);
-  const half     = newValueUsd / 2;
-  const limit    = MAX_TOKEN_EXPOSURE_PCT * INITIAL_CAPITAL_USD;
+function switchBenefitCheck(
+  pos:     MockPosition,
+  current: RankedOpportunity | undefined,
+  best:    RankedOpportunity,
+): SwitchCheck {
+  const currentEffAPY = (current?.effectiveNetAPY ?? 0) > 0
+    ? current!.effectiveNetAPY
+    : (current?.netAPY ?? pos.entryAPY);
+  const bestEffAPY = best.effectiveNetAPY > 0 ? best.effectiveNetAPY : best.netAPY;
 
-  for (const token of extractTokens(pair)) {
-    const current = exposure.get(token) ?? 0;
-    if (current + half > limit) {
-      return {
-        ok:           false,
-        blockedToken: token,
-        currentPct:   current / INITIAL_CAPITAL_USD * 100,
-        addedPct:     half    / INITIAL_CAPITAL_USD * 100,
-        newPct:       (current + half) / INITIAL_CAPITAL_USD * 100,
-      };
-    }
-  }
-  return { ok: true };
+  const posValue = pos.currentValueUsd;
+  const retNew   = posValue * (bestEffAPY    / 100) / 365 * HOLD_HORIZON_DAYS;
+  const retCur   = posValue * (currentEffAPY / 100) / 365 * HOLD_HORIZON_DAYS;
+
+  // Per-chain gas for each leg; slippage = round-trip swap spread
+  const gasCostExit  = GAS_COST_USD[pos.chainId]  ?? GAS_COST_USD_FALLBACK;
+  const gasCostEntry = GAS_COST_USD[best.chainId] ?? GAS_COST_USD_FALLBACK;
+  const slippage     = posValue * (ENTRY_FEE_PCT + EXIT_FEE_PCT);
+  const totalCost    = gasCostExit + gasCostEntry + slippage;
+
+  const benefit = retNew - retCur - totalCost;
+  const hurdle  = posValue * MIN_SWITCH_BENEFIT_PCT;
+  const ok      = benefit >= hurdle;
+
+  const log = `${pos.pair}→${best.pair}: ` +
+    `benefit=$${benefit.toFixed(2)} hurdle=$${hurdle.toFixed(2)} ` +
+    `(effAPY ${bestEffAPY.toFixed(1)}% vs ${currentEffAPY.toFixed(1)}%, ` +
+    `cost=$${totalCost.toFixed(2)})`;
+
+  return { ok, benefit, hurdle, log };
 }
 
-// Prefer RAR-7d when both sides have it; otherwise rank by net APY (fee APY − expected IL)
+// Prefer RAR-7d × capitalUtilization when both sides have it; else rank by effectiveNetAPY.
 // Combined rank factor: sqrt(lq/100) × persistence.
-// Pools with low LQ or spiking APY both rank lower, independently.
 function rarOrApySort(a: RankedOpportunity, b: RankedOpportunity): number {
-  const fa = rankFactor(a.liquidityQuality ?? 50, a.apyPersistence ?? 1.0);
-  const fb = rankFactor(b.liquidityQuality ?? 50, b.apyPersistence ?? 1.0);
-  if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d * fb - a.rar7d * fa;
+  const fa  = rankFactor(a.liquidityQuality ?? 50, a.apyPersistence ?? 1.0);
+  const fb  = rankFactor(b.liquidityQuality ?? 50, b.apyPersistence ?? 1.0);
+  const cua = (a.capitalUtilization ?? 0) > 0 ? a.capitalUtilization : 1.0;
+  const cub = (b.capitalUtilization ?? 0) > 0 ? b.capitalUtilization : 1.0;
+  if (a.rar7d > 0 && b.rar7d > 0) return b.rar7d * cub * fb - a.rar7d * cua * fa;
   if (a.rar7d > 0) return -1;
   if (b.rar7d > 0) return 1;
-  return b.netAPY * fb - a.netAPY * fa;
+  const effA = (a.effectiveNetAPY ?? 0) > 0 ? a.effectiveNetAPY : a.netAPY;
+  const effB = (b.effectiveNetAPY ?? 0) > 0 ? b.effectiveNetAPY : b.netAPY;
+  return effB * fb - effA * fa;
 }

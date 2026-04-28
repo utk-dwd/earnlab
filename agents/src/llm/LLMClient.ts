@@ -65,8 +65,11 @@ Hard constraints (enforced by executor — violations are silently ignored):
 - Max 30 % of capital per pool
 - Max 4 concurrent positions
 - Min 24 h hold before any exit
-- Rebalance: new pool must be >30 % better RAR-7d; fee must recover within 7 days
+- Rebalance: executor checks switchBenefit = (effAPY_new − effAPY_cur) × posValue × 30d/365 − gas − slippage; must exceed 0.5% of position value — only propose rebalances with a compelling improvement in effectiveNetAPY
 - Only decisions with confidence >= 0.75 are executed
+- Portfolio risk budget (all limits are % of $10,000 total capital):
+    chain ≤ 40%  ·  token ≤ 40%  ·  volatile pairs ≤ 50%  ·  stablecoin issuer ≤ 60%  ·  single pool ≤ 30%  ·  cash ≥ 10%
+  Current budget state is shown below — do NOT propose entries that would breach any limit shown as ✗
 
 Ranking priority: prefer pools with high netAPY (= feeAPY − expectedIL). Stable pairs with low IL often beat volatile pairs with high fee APY. Use RAR-7d when available as secondary confirmation.
 
@@ -176,7 +179,32 @@ function buildContext(
     const persistLabel = o.medianAPY7d > 0
       ? `persist=${(o.apyPersistence * 100).toFixed(0)}%(med=${o.medianAPY7d.toFixed(0)}%)`
       : "persist=?";
-    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel} | ${persistLabel}`;
+    const trLabel = o.tokenRisk
+      ? (o.tokenRisk.blockEntry
+          ? `tRisk=BLOCKED(${o.tokenRisk.flags[0] ?? ""})`
+          : `tRisk=${o.tokenRisk.poolRiskScore}`)
+      : "tRisk=?";
+    const srLabel = o.stablecoinRisk
+      ? (o.stablecoinRisk.blockEntry
+          ? `sRisk=BLOCKED(${o.stablecoinRisk.flags[0] ?? ""})`
+          : `sRisk=${o.stablecoinRisk.compositeScore}(peg±${o.stablecoinRisk.pegDeviation.toFixed(2)}%${o.stablecoinRisk.poolImbalance > 0.5 ? ` imb=${o.stablecoinRisk.poolImbalance.toFixed(1)}%` : ""})`)
+      : "";
+    const srPart  = srLabel ? ` | ${srLabel}` : "";
+    const cuLabel = o.capitalUtilization > 0
+      ? `cu=${(o.capitalUtilization * 100).toFixed(0)}%(TiR=${(o.timeInRangePct * 100).toFixed(0)}% FCE=${(o.feeCaptureEfficiency * 100).toFixed(0)}%)`
+      : "cu=?";
+    const effLabel = o.effectiveNetAPY > 0 ? `effAPY=${o.effectiveNetAPY.toFixed(1)}%` : "";
+    const effPart  = effLabel ? ` | ${effLabel}` : "";
+    const advLabel = o.adverseSelection
+      ? `adv=${o.adverseSelection.score}(${o.adverseSelection.quality})`
+      : "adv=?";
+    const stressLabel = o.stressTest
+      ? `stress=worst${o.stressTest.worstCase.netReturn30dPct.toFixed(1)}%(ES${o.stressTest.expectedShortfall30dPct.toFixed(1)}%)`
+      : "stress=?";
+    const scorecardLabel = o.scorecard
+      ? `score=${o.scorecard.composite}/100[Y${o.scorecard.yield}|IL${o.scorecard.il}|LQ${o.scorecard.liquidity}|V${o.scorecard.volatility}|TR${o.scorecard.tokenRisk}|G${o.scorecard.gas}|C${o.scorecard.correlation}|R${o.scorecard.regime}] alloc=${o.scorecard.allocationPct.toFixed(0)}%`
+      : "score=?";
+    return `  ${o.poolId} | ${o.pair} | ${o.chainName} | feeAPY=${o.displayAPY.toFixed(1)}% | ${net} | ${il} | RAR7d=${o.rar7d > 0 ? o.rar7d.toFixed(2) : "n/a"} | TVL=${fmtUsd(o.tvlUsd)} | Δ7d=${(o.pairPriceChange7d * 100).toFixed(1)}% | ${beLabel} | ${lqLabel} | ${persistLabel} | ${cuLabel}${effPart} | ${trLabel}${srPart} | ${advLabel} | ${stressLabel} | ${scorecardLabel}`;
   }).join("\n") || "  (none yet)";
 
   const posLines = positions.length > 0
@@ -188,7 +216,8 @@ function buildContext(
       }).join("\n")
     : "  (none — portfolio is empty)";
 
-  const simLines = fmtSimilar(similar);
+  const simLines  = fmtSimilar(similar);
+  const optLines  = fmtOptimization(summary);
 
   const expEntries = Object.entries(summary.tokenExposure ?? {})
     .filter(([, pct]) => pct >= 1)
@@ -198,7 +227,8 @@ function buildContext(
     ? `TOKEN EXPOSURE (40% limit): ${expEntries.join("  ")}`
     : "TOKEN EXPOSURE: none yet";
 
-  const regimeLabel = fmtRegime(summary.regime);
+  const regimeLabel  = fmtRegime(summary.regime);
+  const budgetLines  = fmtRiskBudget(summary);
 
   return [
     `Time: ${new Date().toUTCString()}`,
@@ -206,7 +236,9 @@ function buildContext(
     `MACRO REGIME: ${regimeLabel}`,
     `PORTFOLIO: cash=$${summary.cashUsd.toFixed(0)} invested=$${summary.investedUsd.toFixed(0)} totalCapital=$${summary.totalCapitalUsd} positions=${summary.openPositions}/4 unrealizedPnL=$${summary.unrealizedPnlUsd.toFixed(2)} realizedPnL=$${summary.realizedPnlUsd.toFixed(2)}`,
     exposureLine,
+    budgetLines,
     ``,
+    ...(optLines ? [`PORTFOLIO OPTIMIZER (marginal-Sharpe ranked):`, optLines, ``] : []),
     `OPPORTUNITIES (ranked RAR-7d > APY):`,
     oppLines,
     ``,
@@ -265,6 +297,29 @@ function fmtHours(h: number): string {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+function fmtOptimization(summary: PortfolioSummary): string {
+  const opt = summary.portfolioOptimization;
+  if (!opt || opt.allocations.length === 0) return "";
+  const header = `portSharpe=${opt.portfolioSharpe.toFixed(2)} portReturn=${opt.portfolioReturn.toFixed(1)}% portRisk=${opt.portfolioRisk.toFixed(0)}/100 cash=${opt.cashReservedPct.toFixed(0)}%`;
+  const rows = opt.allocations.map(a =>
+    `  rank${a.rank} ${a.pair}@${a.chainName} alloc=${a.allocationPct.toFixed(0)}% score=${a.scorecard.composite}/100 mSharpe=${a.marginalSharpe.toFixed(3)} — ${a.reasoning}`
+  ).join("\n");
+  return `${header}\n${rows}`;
+}
+
+function fmtRiskBudget(summary: PortfolioSummary): string {
+  const rb = summary.riskBudget;
+  if (!rb) return "RISK BUDGET: (not yet computed)";
+  const dimStr = rb.dimensions.map(d => {
+    const ok   = d.ok ? "✓" : "✗";
+    const top  = d.topItem ? `(${d.topItem})` : "";
+    return `${d.label}=${d.usedPct.toFixed(0)}%/${d.limitPct}%${ok}${top}`;
+  }).join("  ");
+  const cashStr = `Cash=${rb.cashBufferPct.toFixed(0)}%≥10%${rb.cashOk ? "✓" : "✗"}`;
+  const viols   = rb.violations.length > 0 ? `  ⚠ VIOLATIONS: ${rb.violations.join("; ")}` : "";
+  return `RISK BUDGET: ${dimStr}  ${cashStr}${viols}`;
+}
+
 function fmtRegime(regime: MacroRegime | undefined): string {
   switch (regime) {
     case "risk-off": return "RISK-OFF 🔴 (median ETH Δ7d < -5%) — prefer stable pools, sizing halved";
@@ -311,8 +366,15 @@ Challenge every proposed entry. Look hard for:
 - Liquidity quality: lq/100 composite score (TVL adequacy × vol/TVL activity × APY stability × depth). Score < 40 = thin/unstable pool; weight this heavily
 - APY persistence: medianAPY7d / currentAPY. If persist < 50%, the current APY is a spike vs the 7-day median — treat as temporary, not durable yield
 - Overconcentration: does the portfolio already hold similar token exposure?
+- Capital efficiency (cu): cu = timeInRange × feeCaptureEfficiency. effectiveNetAPY = netAPY × cu. A 40% netAPY pool with cu=50% earns the same as a 20% netAPY pool that stays in range — compare effectiveNetAPY, not raw netAPY. cu < 50% is a strong warning. Check also: if feeCaptureEfficiency < 60%, fees are spike-driven (one-off volume), not sustained.
+- Adverse selection (adv): detects toxic LP flow — fees paid by informed directional traders who are extracting value from LPs. Score 0–100. Score ≥ 45 (elevated) means fee APY, volume, or price drift signals suggest LPs are on the wrong side of informed trades. Score ≥ 70 (high) = strong signal — the fees earned likely don't offset the IL caused by the same traders. Key sub-signals: feeVsPriceMove (fee spike + directional move), postTradePriceDrift (momentum rather than mean reversion), volAcceleration (vol building in second half = ongoing price discovery).
 - Stale data: if RAR is n/a, you have incomplete information — is that acceptable?
+- Token risk: tRisk score (0=safe, 100=dangerous). BLOCKED = hard block (honeypot / balance manipulation / depeg). Score > 40 = meaningful concern. Score > 70 = veto unless everything else is exceptional.
+- Stablecoin risk (sRisk): for stable pools — low APY is NOT automatically safe. Check: peg deviation > 1% is a warning, pool imbalance > 1% shows the pool absorbed a depeg, bridged stablecoins carry extra risk, depeg volatility > 0.5% stdDev means the peg has been unstable. sRisk composite > 40 warrants scrutiny; > 60 is a strong veto signal for what may look like "safe" yield.
+- Switch cost: for rebalances — gas + slippage erodes the gain. The executor enforces a switchBenefit hurdle (0.5% of position value over 30 days), but you should still flag rebalances where effectiveNetAPY is only marginally better.
+- Scenario stress test: downsideScore 0–100 (100 = worst case ≥ −20% in 30 days). expectedShortfall = average of 3 worst scenarios (CVaR proxy). Veto when downsideScore > 60 unless upside is exceptional. Flag when ES < −10%: even average-bad outcomes are deeply negative. Check which scenario is worst — if it's price_down_10 or price_down_20, the pool's IL at concentration leverage is severe. If it's vol_double, the pool's tick range will be breached frequently.
 - Opportunity cost: is this meaningfully better than cash given the risks?
+- Decision scorecard: composite score 0–100 shown as score=X/100[Y|IL|LQ|V|TR|G|C|R]. Each dimension is 0–100. A composite < 40 is weak; < 25 is very weak. Check which specific dimension is pulling the score down — a single 0 (e.g. TR=0 = BLOCKED, G=0 = never breaks even) is a hard red flag even if other dimensions are strong.
 
 Set veto=true and confidence high when you find real risks. Only set veto=false when the opportunity is genuinely compelling AND risks are manageable.`;
 
@@ -374,6 +436,38 @@ function buildCritiqueContext(
     `  Gas break-even: ${beLabel} (entry+exit gas vs LP fees at this size)`,
     `  Liquidity quality: ${opp.liquidityQuality > 0 ? opp.liquidityQuality + "/100" : "?"} (TVL adequacy × vol/TVL activity × APY stability × depth vs vol)`,
     `  APY persistence:   ${opp.medianAPY7d > 0 ? `${(opp.apyPersistence * 100).toFixed(0)}% — current ${opp.displayAPY.toFixed(1)}% vs 7d median ${opp.medianAPY7d.toFixed(1)}%` : "? (collecting history)"}`,
+    `  Capital efficiency: ${opp.capitalUtilization > 0 ? `TiR=${(opp.timeInRangePct * 100).toFixed(0)}%  FCE=${(opp.feeCaptureEfficiency * 100).toFixed(0)}%  utilization=${(opp.capitalUtilization * 100).toFixed(0)}%  effectiveNetAPY=${opp.effectiveNetAPY.toFixed(1)}% (±${opp.halfRangePct.toFixed(2)}% range)` : "? (not yet computed)"}`,
+    ...(opp.adverseSelection ? [
+      `  Adverse selection: score=${opp.adverseSelection.score}/100 (${opp.adverseSelection.quality})`,
+      `    Fee vs price move:       ${opp.adverseSelection.feeVsPriceMove.toFixed(0)}/100`,
+      `    Volume during moves:     ${opp.adverseSelection.volumeDuringLargeMoves.toFixed(0)}/100`,
+      `    Price drift (momentum):  ${(opp.adverseSelection.postTradePriceDrift * 100).toFixed(0)}%`,
+      `    Vol acceleration:        ${opp.adverseSelection.volatilityAfterVolumeSpikes.toFixed(2)}×`,
+      ...(opp.adverseSelection.flags.length ? [`    Flags: ${opp.adverseSelection.flags.join("; ")}`] : []),
+    ] : [`  Adverse selection: ? (not yet computed)`]),
+    ...(opp.stressTest ? [
+      `  Stress test (8 scenarios, 30d horizon):`,
+      `    Downside score:    ${opp.stressTest.downsideScore.toFixed(0)}/100  (100 = worst case ≥ −20% loss)`,
+      `    Baseline 30d:      ${opp.stressTest.baseline30dPct >= 0 ? "+" : ""}${opp.stressTest.baseline30dPct.toFixed(2)}%`,
+      `    Worst case:        ${opp.stressTest.worstCase.netReturn30dPct.toFixed(2)}%  (${opp.stressTest.worstCase.name}: ${opp.stressTest.worstCase.description})`,
+      `    Exp. shortfall:    ${opp.stressTest.expectedShortfall30dPct.toFixed(2)}%  (avg of 3 worst)`,
+      `    All scenarios (worst-first):`,
+      ...opp.stressTest.scenarios.map(s =>
+        `      ${s.name.padEnd(16)} net=${s.netReturn30dPct >= 0 ? "+" : ""}${s.netReturn30dPct.toFixed(2)}%  fees=${s.feeReturn30dPct.toFixed(2)}%  IL+gas=${s.ilLoss30dPct.toFixed(2)}%${s.breachesRange ? "  [out of range]" : ""}`
+      ),
+    ] : [`  Stress test: ? (not yet computed)`]),
+    `  Token risk score:  ${opp.tokenRisk ? `${opp.tokenRisk.poolRiskScore}/100${opp.tokenRisk.blockEntry ? " [BLOCKED]" : ""}${opp.tokenRisk.flags.length ? " — " + opp.tokenRisk.flags.join("; ") : ""}` : "? (not yet assessed)"}`,
+    ...(opp.stablecoinRisk ? [
+      `  Stablecoin risk:`,
+      `    Peg deviation:    ${opp.stablecoinRisk.pegDeviation.toFixed(3)}% from $1${opp.stablecoinRisk.blockEntry ? " [HARD BLOCK — depeg > 5%]" : ""}`,
+      `    Pool imbalance:   ${opp.stablecoinRisk.isStablePool ? opp.stablecoinRisk.poolImbalance.toFixed(3) + "%" : "n/a (not a stable pair)"}`,
+      `    Issuer risk:      ${opp.stablecoinRisk.issuerRisk}/30 (${opp.stablecoinRisk.token0Risk ? opp.stablecoinRisk.token0Risk.symbol + "=" + opp.stablecoinRisk.token0Risk.issuerRisk : "—"}${opp.stablecoinRisk.token1Risk ? " / " + opp.stablecoinRisk.token1Risk.symbol + "=" + opp.stablecoinRisk.token1Risk.issuerRisk : ""})`,
+      `    Bridge risk:      ${opp.stablecoinRisk.bridgeRisk}/35${opp.stablecoinRisk.bridgeRisk > 0 ? " — bridged token" : " — native"}`,
+      `    Chain risk:       ${opp.stablecoinRisk.chainRisk}/25`,
+      `    Depeg volatility: ${opp.stablecoinRisk.depegVolatility > 0 ? opp.stablecoinRisk.depegVolatility.toFixed(3) + "% stdDev 7d" : "no history"}`,
+      `    Composite score:  ${opp.stablecoinRisk.compositeScore}/100${opp.stablecoinRisk.compositeScore > 50 ? " ⚠ elevated" : ""}`,
+      ...(opp.stablecoinRisk.flags.length ? [`    Flags: ${opp.stablecoinRisk.flags.join("; ")}`] : []),
+    ] : []),
     ``,
     `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
     `OPEN POSITIONS:`,

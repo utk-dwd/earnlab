@@ -107,7 +107,11 @@ export interface RARResult {
 }
 
 // ─── Price cache ──────────────────────────────────────────────────────────────
-const volatilityCache = new Map<string, VolatilityResult & { ts: number }>();
+const volatilityCache  = new Map<string, VolatilityResult & { ts: number }>();
+// Raw hourly price data — keyed by `${chainId}:${address}:${hours}`.
+// Populated inside fetchHourlyPrices so any caller that wants the same data
+// (e.g. CapitalEfficiencyCalculator) avoids a second network round-trip.
+const priceDataCache   = new Map<string, { data: { price: number }[]; ts: number }>();
 
 // ─── Core math ────────────────────────────────────────────────────────────────
 function annualisedVol(prices: { price: number }[]): { vol: number; n: number } {
@@ -133,7 +137,7 @@ function annualisedVol(prices: { price: number }[]): { vol: number; n: number } 
 }
 
 // ─── DefiLlama price fetch ────────────────────────────────────────────────────
-async function fetchHourlyPrices(
+export async function fetchHourlyPrices(
   chainId: number,
   tokenAddress: string,
   hours: number
@@ -142,15 +146,21 @@ async function fetchHourlyPrices(
   const now   = Math.floor(Date.now() / 1000);
   const start = now - hours * 3600;
 
+  const coinKey = tokenAddress.toLowerCase() === NATIVE_ADDRESS
+    ? (NATIVE_COIN_KEY[chainId] ?? "coingecko:ethereum")
+    : `${slug}:${tokenAddress}`;
+  const cacheKey = `${chainId}:${tokenAddress.toLowerCase()}:${hours}`;
+  const cached   = priceDataCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.data;
+
   try {
-    const coinKey = tokenAddress.toLowerCase() === NATIVE_ADDRESS
-      ? (NATIVE_COIN_KEY[chainId] ?? "coingecko:ethereum")
-      : `${slug}:${tokenAddress}`;
     const resp = await axios.get("https://coins.llama.fi/chart/" + coinKey, {
       params:  { start, span: hours + 2, period: "1h" },
       timeout: 8_000,
     });
-    return resp.data?.coins?.[coinKey]?.prices ?? [];
+    const data: { price: number }[] = resp.data?.coins?.[coinKey]?.prices ?? [];
+    priceDataCache.set(cacheKey, { data, ts: Date.now() });
+    return data;
   } catch {
     return [];
   }

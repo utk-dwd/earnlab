@@ -1,5 +1,126 @@
 // Mirrors the OpenAPI schema — keeps frontend and agent in sync
 
+export interface TokenRiskResult {
+  symbol:     string;
+  riskScore:  number;
+  blockEntry: boolean;
+  flags:      string[];
+  tier1:      boolean;
+  checkedAt:  number;
+}
+
+export interface PoolRiskResult {
+  token0:        TokenRiskResult;
+  token1:        TokenRiskResult;
+  poolRiskScore: number;
+  blockEntry:    boolean;
+  flags:         string[];
+  checkedAt:     number;
+}
+
+export interface StableTokenRisk {
+  symbol:          string;
+  pegDeviation:    number;
+  issuerRisk:      number;
+  bridgeRisk:      number;
+  depegVolatility: number;
+  tokenScore:      number;
+}
+
+export interface StablecoinRiskResult {
+  isStablePool:    boolean;
+  hasStable:       boolean;
+  token0Risk:      StableTokenRisk | null;
+  token1Risk:      StableTokenRisk | null;
+  pegDeviation:    number;
+  poolImbalance:   number;
+  issuerRisk:      number;
+  bridgeRisk:      number;
+  chainRisk:       number;
+  depegVolatility: number;
+  compositeScore:  number;
+  blockEntry:      boolean;
+  flags:           string[];
+  checkedAt:       number;
+}
+
+export interface AdverseSelectionResult {
+  score:                       number;
+  quality:                     "low" | "moderate" | "elevated" | "high";
+  feeVsPriceMove:              number;
+  volumeDuringLargeMoves:      number;
+  postTradePriceDrift:         number;
+  volatilityAfterVolumeSpikes: number;
+  flags:                       string[];
+}
+
+export interface DecisionScorecard {
+  yield:       number;
+  il:          number;
+  liquidity:   number;
+  volatility:  number;
+  tokenRisk:   number;
+  gas:         number;
+  correlation: number;
+  regime:      number;
+  composite:   number;
+  allocationPct: number;
+  labels: {
+    yield:       string;
+    il:          string;
+    liquidity:   string;
+    volatility:  string;
+    tokenRisk:   string;
+    gas:         string;
+    correlation: string;
+    regime:      string;
+  };
+}
+
+export interface PortfolioAllocation {
+  rank:             number;
+  poolId:           string;
+  pair:             string;
+  chainName:        string;
+  feeTierLabel:     string;
+  effectiveNetAPY:  number;
+  scorecard:        DecisionScorecard;
+  allocationPct:    number;
+  allocationUsd:    number;
+  marginalReturn:   number;
+  marginalRisk:     number;
+  marginalSharpe:   number;
+  reasoning:        string;
+}
+
+export interface OptimizationResult {
+  allocations:     PortfolioAllocation[];
+  portfolioReturn: number;
+  portfolioRisk:   number;
+  portfolioSharpe: number;
+  cashReservedPct: number;
+}
+
+export interface StressScenario {
+  id:              string;
+  name:            string;
+  description:     string;
+  netReturn30dPct: number;
+  effAPYUnder:     number;
+  breachesRange:   boolean;
+  timeInRange:     number;
+  feeReturn30dPct: number;
+  ilLoss30dPct:    number;
+}
+
+export interface StressTestResult {
+  baseline30dPct:          number;
+  worstCase:               StressScenario;
+  expectedShortfall30dPct: number;
+  downsideScore:           number;
+  scenarios:               StressScenario[];
+}
+
 export interface RankedOpportunity {
   rank:          number;
   chainId:       number;
@@ -34,6 +155,16 @@ export interface RankedOpportunity {
   liquidityQuality:     number;
   medianAPY7d:          number;
   apyPersistence:       number;
+  tokenRisk:            PoolRiskResult | null;
+  stablecoinRisk:       StablecoinRiskResult | null;
+  timeInRangePct:       number;
+  feeCaptureEfficiency: number;
+  capitalUtilization:   number;
+  effectiveNetAPY:      number;
+  halfRangePct:         number;
+  adverseSelection:     AdverseSelectionResult | null;
+  stressTest:           StressTestResult | null;
+  scorecard:            DecisionScorecard | null;
   lastUpdated:          number;
 }
 
@@ -157,6 +288,23 @@ export interface DecisionCycle {
 
 export type MacroRegime = "risk-off" | "neutral" | "risk-on";
 
+export interface RiskBudgetDimension {
+  id:       string;
+  label:    string;
+  usedPct:  number;
+  limitPct: number;
+  ok:       boolean;
+  topItem?: string;
+}
+
+export interface RiskBudgetState {
+  dimensions:    RiskBudgetDimension[];
+  cashBufferPct: number;
+  cashOk:        boolean;
+  canOpenNew:    boolean;
+  violations:    string[];
+}
+
 export interface PortfolioSummary {
   totalCapitalUsd:        number;
   cashUsd:                number;
@@ -175,6 +323,8 @@ export interface PortfolioSummary {
   lastDecisionAt:         number | null;
   tokenExposure:          Record<string, number>;
   regime:                 MacroRegime;
+  riskBudget:             RiskBudgetState;
+  portfolioOptimization:  OptimizationResult | null;
 }
 
 export interface YieldsResponse          { count: number; data: RankedOpportunity[] }

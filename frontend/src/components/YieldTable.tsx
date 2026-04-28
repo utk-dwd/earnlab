@@ -2,7 +2,7 @@
 
 import { useState, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { RankedOpportunity } from "../types/api";
+import type { RankedOpportunity, PoolRiskResult, StablecoinRiskResult, AdverseSelectionResult, StressTestResult, DecisionScorecard } from "../types/api";
 
 interface Props {
   opportunities: RankedOpportunity[];
@@ -10,7 +10,7 @@ interface Props {
 }
 
 type NetworkFilter = "all" | "mainnet" | "testnet";
-type SortKey = "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd" | "liquidityQuality" | "apyPersistence";
+type SortKey = "effectiveNetAPY" | "netAPY" | "displayAPY" | "rar7d" | "rar24h" | "tvlUsd" | "volume24hUsd" | "liquidityQuality" | "apyPersistence" | "downsideScore" | "composite";
 
 // ─── Tooltip component (portal-based to escape overflow containers) ───────────
 function Tooltip({ text, children }: { text: string; children: React.ReactNode }) {
@@ -130,8 +130,122 @@ Example: AAVE/USDC
   Expected IL = 0.5 × 0.80² × 100 = 32%
   Net APY ≈ 122%
 
-"—" = volatility not yet computed.
-Sorted by Net APY by default (★).`;
+"—" = volatility not yet computed.`;
+
+const ADV_SEL_TOOLTIP = `Adverse Selection Score (0–100)
+Detects whether LP fees are earned from
+informed directional traders — a sign that
+LPs are paying more in IL than they earn.
+
+Four sub-signals (each 0–100):
+
+  Fee vs Price Move
+    Fee APY spike aligned with a sharp
+    directional 24h price move.
+    High → informed traders paid fees while
+    extracting LP value.
+
+  Volume During Moves
+    High daily turnover (vol/TVL) coinciding
+    with vol24h > vol7d baseline.
+    High → volume is concentrated in
+    adversely selected periods.
+
+  Price Drift (momentum)
+    Blend of trendiness and lag-1 return
+    autocorrelation. >55% = price keeps
+    moving in the same direction — LPs are
+    on the wrong side of a trend.
+
+  Vol Acceleration
+    Late-session vol / early-session vol.
+    >1.5× = volatility building, not dissipating.
+    Suggests ongoing informed price discovery.
+
+Score  0–24   low      — balanced flow
+Score 25–44   moderate — minor signals
+Score 45–69   elevated — worth scrutiny
+Score 70+     high     — likely toxic flow`;
+
+const EFF_APY_TOOLTIP = `Effective Net APY ★ (default sort)
+= Net APY × Capital Utilization
+
+Capital Utilization = TimeInRange × FeeCaptureEfficiency
+
+TimeInRange (TiR):
+  Fraction of the last 7 d (168 hourly prices)
+  where the pair price stayed within ±2σ₇ₐ
+  of today's price. Out-of-range = zero fees.
+
+FeeCaptureEfficiency (FCE):
+  √(min(liveAPY, refAPY) / max(liveAPY, refAPY))
+  Measures whether fees are spike-driven (FCE ≈ 0.3)
+  or consistently earned (FCE ≈ 1.0).
+
+Example:
+  Pool A: netAPY=120%  TiR=55%  FCE=70%  → effAPY=46%
+  Pool B: netAPY=35%   TiR=92%  FCE=95%  → effAPY=31%
+  Pool A looks better on netAPY but Pool B
+  delivers more reliable real-world yield.
+
+"—" = capital efficiency not yet computed.`;
+
+const STRESS_TOOLTIP = `Scenario Stress Test (30-day horizon)
+Simulates 8 adversarial scenarios before LP entry.
+Returns net P&L as % of position over 30 days.
+
+Scenarios:
+  Token −5%   one-time 5% price drop; position held
+  Token −10%  one-time 10% drop
+  Token −20%  severe market stress
+  Vol ×2      volatility doubles; IL ×4, TiR falls
+  Vol −50%    trading volume halves; fee APY halves
+  APY reverts fee APY reverts to 7d median
+  Gas ×5      entry gas cost spikes 5×
+  Stable −50bps  stablecoin depegs 50 bps from $1
+
+Downside Score (0–100):
+  = min(100, max(0, −worstCase × 5))
+  0   all scenarios profitable
+  100 worst case ≥ −20% loss
+
+Expected Shortfall (ES):
+  Average of the 3 worst scenario returns.
+  CVaR proxy — measures tail risk, not just
+  the single worst outcome.
+
+Color: green <0 (all profitable) · yellow 0–30
+       orange 30–60 · red ≥ 60`;
+
+const SCORECARD_TOOLTIP = `Decision Scorecard (0–100 per dimension)
+Composite = weighted sum of 8 dimensions.
+Higher = better on every dimension.
+
+  Yield      25%  effectiveNetAPY potential
+                  (adverse-selection adjusted)
+  IL         20%  protection from impermanent loss
+                  0% IL eats = 100; IL ≥ APY = 0
+  Liquidity  15%  pool depth, activity, APY stability
+                  (= liquidityQuality score)
+  Volatility 10%  time-in-range + price move penalty
+  Token Risk 10%  inverse GoPlus score
+                  0 = BLOCKED; 100 = fully clean
+  Gas         5%  break-even speed
+                  7-day BE → 0; same-block BE → 100
+  Correlation 10% portfolio diversification benefit
+                  new tokens + chain → 100
+                  full overlap → 20
+  Regime      5%  macro fit
+                  risk-off+stable → 90
+                  risk-on+volatile → 90
+
+Composite 80–100  exceptional across all dimensions
+Composite 60–79   solid — enter with confidence
+Composite 40–59   mixed — one or more weak spots
+Composite < 40    significant concern — review labels
+Composite < 25    avoid — multiple red flags
+
+AllocationPct = Kelly × composite/100 (max 30%)`;
 
 const PRICE_CHANGE_24H_TOOLTIP = `Pair Price Change (24 h)
 = (rate_now − rate_24h_ago) / rate_24h_ago
@@ -153,20 +267,98 @@ Computed from the same hourly DefiLlama
 data used for volatility.
 "—" = no data yet.`;
 
+const TOKEN_RISK_TOOLTIP = `Token Risk Score (0–100)
+Powered by GoPlus Security API (free).
+Lower score = safer. TIER1 tokens = 5.
+
+Hard blocks — agent will NOT enter:
+  • Honeypot: cannot sell tokens
+  • Owner can change holder balances
+  • Stablecoin depegged > 5% from $1
+
+Advisory scoring (+points per flag):
+  Unverified source code   +20
+  Upgradeable proxy        +15
+  Hidden owner             +25
+  Selfdestruct present     +30
+  Blacklist / pause        +20
+  Ownership reclaim        +25
+  Transfers pausable       +15
+  High buy/sell tax >10%   +15 each
+  Top holder > 30% supply  +15
+  Fewer than 100 holders   +10
+
+Score  0–15  safe (TIER1 or clean API data)
+Score 16–40  advisory — minor concerns
+Score 41–70  caution — notable risks
+Score  71+   high risk — agent avoids
+
+"?" = not yet assessed (runs async after RAR)
+BLOCKED = hard-blocked, agent will skip`;
+
+const STABLE_RISK_TOOLTIP = `Stablecoin Risk Score (0–100)
+Only shown for pools containing at least one stablecoin.
+
+Six tracked dimensions (lower = safer):
+
+  pegDeviation     current |price − $1| in %
+                   > 1% = warning, > 5% = BLOCKED
+
+  poolImbalance    |token0/token1 ratio − 1| × 100
+                   stable/stable pools only — a skewed
+                   ratio means the pool absorbed a depeg
+
+  issuerRisk       protocol + collateral model tier
+                   USDC/USDT ≈ 5–8  FRAX/crvUSD ≈ 18
+                   USDe/USDB ≈ 25–30
+
+  bridgeRisk       native = 0  /  CCTP = 0
+                   bridged (.e / axl / cel) = 15–35
+                   old Multichain wrappers = 35
+
+  chainRisk        chain maturity (Ethereum=0, new L2=22)
+
+  depegVolatility  stdDev(hourly price − $1) over 7 d
+                   > 0.3% = the peg has been unstable recently
+
+Score 0–20   healthy — low structural risk
+Score 21–40  acceptable — some minor concerns
+Score 41–60  caution — notable risk, worth scrutiny
+Score 61+    high risk — stable yield may be misleading
+BLOCKED      peg deviation > 5%, agent will skip`;
+
 // ─── Main table ───────────────────────────────────────────────────────────────
 export function YieldTable({ opportunities, isLoading }: Props) {
   const [networkFilter, setNetworkFilter] = useState<NetworkFilter>("all");
-  const [sortKey,       setSortKey]       = useState<SortKey>("netAPY");
+  const [sortKey,       setSortKey]       = useState<SortKey>("effectiveNetAPY");
   const [showRefOnly,   setShowRefOnly]   = useState(false);
 
   const filtered = opportunities
     .filter((o) => networkFilter === "all" || o.network === networkFilter)
     .filter((o) => !showRefOnly || o.apySource === "reference")
     .sort((a, b) => {
+        if (sortKey === "effectiveNetAPY") {
+        // Fall back: if not yet computed, use netAPY or displayAPY
+        const aN = a.effectiveNetAPY > 0 ? a.effectiveNetAPY : (a.expectedIL > 0 ? a.netAPY : a.displayAPY);
+        const bN = b.effectiveNetAPY > 0 ? b.effectiveNetAPY : (b.expectedIL > 0 ? b.netAPY : b.displayAPY);
+        return bN - aN;
+      }
       // For netAPY, fall back to displayAPY when expectedIL hasn't been computed yet
       if (sortKey === "netAPY") {
         const aN = a.expectedIL > 0 ? a.netAPY : a.displayAPY;
         const bN = b.expectedIL > 0 ? b.netAPY : b.displayAPY;
+        return bN - aN;
+      }
+      // downsideScore: lower is safer — sort ascending (best first)
+      if (sortKey === "downsideScore") {
+        const aN = a.stressTest?.downsideScore ?? 100;
+        const bN = b.stressTest?.downsideScore ?? 100;
+        return aN - bN;
+      }
+      // composite scorecard sort
+      if (sortKey === "composite") {
+        const aN = a.scorecard?.composite ?? 0;
+        const bN = b.scorecard?.composite ?? 0;
         return bN - aN;
       }
       return (b[sortKey] as number) - (a[sortKey] as number);
@@ -194,7 +386,8 @@ export function YieldTable({ opportunities, isLoading }: Props) {
 
         <select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)}
           className="text-xs border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200">
-          <option value="netAPY">Sort: Net APY ★</option>
+          <option value="effectiveNetAPY">Sort: Eff. APY ★</option>
+          <option value="netAPY">Sort: Net APY</option>
           <option value="displayAPY">Sort: Fee APY</option>
           <option value="rar7d">Sort: RAR (7d)</option>
           <option value="rar24h">Sort: RAR (24h)</option>
@@ -202,6 +395,8 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           <option value="volume24hUsd">Sort: Volume 24h</option>
           <option value="liquidityQuality">Sort: LQ Score</option>
           <option value="apyPersistence">Sort: Persistence</option>
+          <option value="downsideScore">Sort: Stress (safest first)</option>
+          <option value="composite">Sort: Scorecard</option>
         </select>
 
         <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300 cursor-pointer">
@@ -228,7 +423,13 @@ export function YieldTable({ opportunities, isLoading }: Props) {
               </th>
               <th className="px-3 py-3">
                 <Tooltip text={NET_APY_TOOLTIP}>
-                  <span className="border-b border-dashed border-gray-400 cursor-help">Net APY ★</span>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Net APY</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={EFF_APY_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Eff. APY ★</span>
                   <InfoIcon />
                 </Tooltip>
               </th>
@@ -238,6 +439,36 @@ export function YieldTable({ opportunities, isLoading }: Props) {
               <th className="px-3 py-3">
                 <Tooltip text={LQ_TOOLTIP}>
                   <span className="border-b border-dashed border-gray-400 cursor-help">LQ</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={TOKEN_RISK_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">T.Risk</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={STABLE_RISK_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">S.Risk</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={ADV_SEL_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Adv.Sel</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={STRESS_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Stress</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
+              <th className="px-3 py-3">
+                <Tooltip text={SCORECARD_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Score</span>
                   <InfoIcon />
                 </Tooltip>
               </th>
@@ -274,10 +505,10 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {isLoading && filtered.length === 0 && (
-              <tr><td colSpan={16} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
+              <tr><td colSpan={22} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
             )}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={16} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
+              <tr><td colSpan={22} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
             )}
             {filtered.map((o) => (
               <tr key={`${o.chainId}-${o.poolId}`}
@@ -303,11 +534,26 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                   <NetAPYCell feeAPY={o.displayAPY} expectedIL={o.expectedIL} netAPY={o.netAPY} />
                 </td>
                 <td className="px-3 py-2.5">
+                  <EffectiveAPYCell
+                    effectiveNetAPY={o.effectiveNetAPY}
+                    netAPY={o.netAPY}
+                    capitalUtilization={o.capitalUtilization}
+                    timeInRangePct={o.timeInRangePct}
+                    feeCaptureEfficiency={o.feeCaptureEfficiency}
+                    halfRangePct={o.halfRangePct}
+                  />
+                </td>
+                <td className="px-3 py-2.5">
                   <SourceBadge source={o.apySource} />
                 </td>
                 <td className="px-3 py-2.5 tabular-nums text-gray-600 dark:text-gray-300 text-xs">{fmtUsd(o.tvlUsd)}</td>
                 <td className="px-3 py-2.5 tabular-nums text-gray-600 dark:text-gray-300 text-xs">{fmtUsd(o.volume24hUsd)}</td>
                 <td className="px-3 py-2.5"><LQBadge lq={o.liquidityQuality} /></td>
+                <td className="px-3 py-2.5"><TokenRiskBadge tokenRisk={o.tokenRisk} /></td>
+                <td className="px-3 py-2.5"><StableRiskBadge stableRisk={o.stablecoinRisk} /></td>
+                <td className="px-3 py-2.5"><AdvSelBadge adv={o.adverseSelection} /></td>
+                <td className="px-3 py-2.5"><StressBadge stress={o.stressTest} /></td>
+                <td className="px-3 py-2.5"><ScorecardBadge scorecard={o.scorecard} /></td>
                 <td className="px-3 py-2.5"><RiskBadge risk={o.risk} /></td>
 
                 {/* RAR 24h */}
@@ -338,10 +584,16 @@ export function YieldTable({ opportunities, isLoading }: Props) {
       {/* ── Legend ── */}
       <div className="px-4 py-2 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-400 flex flex-wrap gap-4">
         <span><strong>live</strong> = on-chain fee APY &nbsp;·&nbsp; <strong>ref</strong> = DefiLlama reference</span>
-        <span><strong>Net APY ★</strong> = Fee APY − Expected IL &nbsp;·&nbsp; default sort</span>
+        <span><strong>Eff. APY ★</strong> = Net APY × (TiR × FCE) &nbsp;·&nbsp; realistic yield on deployed capital &nbsp;·&nbsp; default sort</span>
+        <span><strong>Net APY</strong> = Fee APY − Expected IL</span>
         <span><strong>RAR</strong> = APY ÷ annualised vol (Sharpe, Rf=0) &nbsp;·&nbsp; higher is better</span>
         <span><strong>LQ</strong> = liquidity quality 0–100 &nbsp;·&nbsp; used as √(lq/100) multiplier on RAR ranking</span>
         <span><strong>Persist</strong> = medianAPY7d / currentAPY &nbsp;·&nbsp; &lt;50% = volume spike, not durable yield</span>
+        <span><strong>T.Risk</strong> = GoPlus token safety score 0–100 &nbsp;·&nbsp; BLOCKED = agent will not enter</span>
+        <span><strong>S.Risk</strong> = stablecoin risk 0–100 (peg, imbalance, issuer, bridge, chain, depeg vol) &nbsp;·&nbsp; only for stable pools</span>
+        <span><strong>Adv.Sel</strong> = adverse selection 0–100 &nbsp;·&nbsp; elevated/high = fees earned from informed directional traders, not balanced flow</span>
+        <span><strong>Stress</strong> = downside score 0–100 over 8 adversarial 30-day scenarios &nbsp;·&nbsp; 0 = all profitable, 100 = worst case ≥ −20% loss &nbsp;·&nbsp; ES = avg of 3 worst</span>
+        <span><strong>Score</strong> = composite decision scorecard 0–100 (weighted: yield 25%, IL 20%, LQ 15%, vol 10%, token 10%, gas 5%, corr 10%, regime 5%) &nbsp;·&nbsp; hover for breakdown</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -390,6 +642,41 @@ function NetAPYCell({ feeAPY, expectedIL, netAPY }: { feeAPY: number; expectedIL
     <Tooltip text={tooltip}>
       <span className={`font-bold tabular-nums text-xs cursor-help ${color}`}>
         {netAPY >= 0 ? "" : "−"}{Math.abs(netAPY).toFixed(1)}%
+      </span>
+    </Tooltip>
+  );
+}
+
+function EffectiveAPYCell({ effectiveNetAPY, netAPY, capitalUtilization, timeInRangePct, feeCaptureEfficiency, halfRangePct }: {
+  effectiveNetAPY: number; netAPY: number; capitalUtilization: number;
+  timeInRangePct: number; feeCaptureEfficiency: number; halfRangePct: number;
+}) {
+  if (!capitalUtilization) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">—</span>;
+  }
+  const tip = [
+    `Effective Net APY = ${effectiveNetAPY.toFixed(2)}%`,
+    `Net APY × capitalUtilization`,
+    `  Net APY:     ${netAPY.toFixed(2)}%`,
+    `  Utilization: ${(capitalUtilization * 100).toFixed(1)}%`,
+    ``,
+    `  TimeInRange: ${(timeInRangePct * 100).toFixed(1)}%  (±${halfRangePct.toFixed(2)}% range)`,
+    `  FCE:         ${(feeCaptureEfficiency * 100).toFixed(1)}%`,
+  ].join("\n");
+  const color = effectiveNetAPY >= 20 ? "text-emerald-600 dark:text-emerald-400"
+    : effectiveNetAPY >= 5  ? "text-green-500 dark:text-green-400"
+    : effectiveNetAPY >= 0  ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  const cuColor = capitalUtilization >= 0.7 ? "text-emerald-500" : capitalUtilization >= 0.5 ? "text-yellow-500" : "text-red-500";
+  return (
+    <Tooltip text={tip}>
+      <span className="cursor-help flex items-center gap-1">
+        <span className={`font-bold tabular-nums text-xs ${color}`}>
+          {effectiveNetAPY.toFixed(1)}%
+        </span>
+        <span className={`tabular-nums text-xs ${cuColor}`}>
+          ({(capitalUtilization * 100).toFixed(0)}%)
+        </span>
       </span>
     </Tooltip>
   );
@@ -447,6 +734,176 @@ function LQBadge({ lq }: { lq: number }) {
     <span className={`font-mono font-semibold tabular-nums text-xs ${color}`}>
       {lq}
     </span>
+  );
+}
+
+function StableRiskBadge({ stableRisk }: { stableRisk: StablecoinRiskResult | null | undefined }) {
+  // No stablecoins in this pool — show nothing
+  if (stableRisk == null) {
+    return <span className="text-gray-200 dark:text-gray-700 text-xs">—</span>;
+  }
+  if (stableRisk.blockEntry) {
+    const tip = `BLOCKED: depeg > 5%\nPeg deviation: ${stableRisk.pegDeviation.toFixed(2)}%\n${stableRisk.flags.join("\n")}`;
+    return (
+      <Tooltip text={tip}>
+        <span className="text-xs px-1.5 py-0.5 rounded-full font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 cursor-help">
+          BLOCK
+        </span>
+      </Tooltip>
+    );
+  }
+
+  const score = stableRisk.compositeScore;
+  const color = score <= 20 ? "text-emerald-600 dark:text-emerald-400"
+    : score <= 40            ? "text-green-500 dark:text-green-400"
+    : score <= 60            ? "text-yellow-500 dark:text-yellow-400"
+    : "text-orange-500 dark:text-orange-400";
+
+  // Build tooltip with all 6 dimensions
+  const imbalanceLine = stableRisk.isStablePool
+    ? `Pool imbalance: ${stableRisk.poolImbalance.toFixed(3)}%`
+    : "Pool imbalance: n/a";
+  const volLine = stableRisk.depegVolatility > 0
+    ? `Depeg vol 7d:   ${stableRisk.depegVolatility.toFixed(3)}% stdDev`
+    : "Depeg vol 7d:   no history";
+  const tip = [
+    `Composite: ${score}/100`,
+    `Peg deviation:  ${stableRisk.pegDeviation.toFixed(3)}%`,
+    imbalanceLine,
+    `Issuer risk:    ${stableRisk.issuerRisk}/30`,
+    `Bridge risk:    ${stableRisk.bridgeRisk}/35`,
+    `Chain risk:     ${stableRisk.chainRisk}/25`,
+    volLine,
+    ...(stableRisk.flags.length ? ["", ...stableRisk.flags] : []),
+  ].join("\n");
+
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
+        {score}
+      </span>
+    </Tooltip>
+  );
+}
+
+function TokenRiskBadge({ tokenRisk }: { tokenRisk: PoolRiskResult | null | undefined }) {
+  if (tokenRisk == null) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  }
+  if (tokenRisk.blockEntry) {
+    const tip = `BLOCKED\n${tokenRisk.flags.join("\n")}`;
+    return (
+      <Tooltip text={tip}>
+        <span className="text-xs px-1.5 py-0.5 rounded-full font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 cursor-help">
+          BLOCK
+        </span>
+      </Tooltip>
+    );
+  }
+  const score = tokenRisk.poolRiskScore;
+  const color = score <= 15 ? "text-emerald-600 dark:text-emerald-400"
+    : score <= 40            ? "text-yellow-500 dark:text-yellow-400"
+    : score <= 70            ? "text-orange-500 dark:text-orange-400"
+    : "text-red-500 dark:text-red-400";
+  const tip = tokenRisk.flags.length
+    ? `Score: ${score}/100\n${tokenRisk.flags.join("\n")}`
+    : `Score: ${score}/100 — no flags`;
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
+        {score}
+      </span>
+    </Tooltip>
+  );
+}
+
+function AdvSelBadge({ adv }: { adv: AdverseSelectionResult | null | undefined }) {
+  if (adv == null) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  }
+  const { score, quality, feeVsPriceMove, volumeDuringLargeMoves, postTradePriceDrift, volatilityAfterVolumeSpikes, flags } = adv;
+  const color = quality === "high"     ? "text-red-500 dark:text-red-400"
+    : quality === "elevated"           ? "text-orange-500 dark:text-orange-400"
+    : quality === "moderate"           ? "text-yellow-500 dark:text-yellow-400"
+    : "text-emerald-600 dark:text-emerald-400";
+  const tip = [
+    `Adverse selection: ${score}/100 (${quality})`,
+    ``,
+    `Fee vs price move:    ${feeVsPriceMove.toFixed(0)}/100`,
+    `Volume during moves:  ${volumeDuringLargeMoves.toFixed(0)}/100`,
+    `Price drift:          ${(postTradePriceDrift * 100).toFixed(0)}%`,
+    `Vol acceleration:     ${volatilityAfterVolumeSpikes.toFixed(2)}×`,
+    ...(flags.length ? [``, ...flags] : []),
+  ].join("\n");
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
+        {score}
+      </span>
+    </Tooltip>
+  );
+}
+
+function StressBadge({ stress }: { stress: StressTestResult | null | undefined }) {
+  if (stress == null) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  }
+  const { downsideScore, worstCase, expectedShortfall30dPct, baseline30dPct, scenarios } = stress;
+  const color = downsideScore === 0 ? "text-emerald-600 dark:text-emerald-400"
+    : downsideScore < 30            ? "text-green-500 dark:text-green-400"
+    : downsideScore < 60            ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  const scenarioLines = scenarios.slice(0, 5).map(
+    s => `  ${s.name.padEnd(14)} ${s.netReturn30dPct >= 0 ? "+" : ""}${s.netReturn30dPct.toFixed(1)}%${s.breachesRange ? " [out of range]" : ""}`
+  );
+  const tip = [
+    `Stress test (30d horizon)`,
+    `Downside score: ${downsideScore.toFixed(0)}/100`,
+    `Baseline 30d:   ${baseline30dPct >= 0 ? "+" : ""}${baseline30dPct.toFixed(1)}%`,
+    `Worst case:     ${worstCase.netReturn30dPct.toFixed(1)}% (${worstCase.name})`,
+    `Exp. shortfall: ${expectedShortfall30dPct.toFixed(1)}% (avg 3 worst)`,
+    ``,
+    `Worst 5 scenarios:`,
+    ...scenarioLines,
+  ].join("\n");
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
+        {downsideScore.toFixed(0)}
+      </span>
+    </Tooltip>
+  );
+}
+
+function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | undefined }) {
+  if (scorecard == null) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
+  }
+  const { composite, yield: y, il, liquidity, volatility, tokenRisk, gas, correlation, regime, allocationPct, labels } = scorecard;
+  const color = composite >= 80 ? "text-emerald-600 dark:text-emerald-400"
+    : composite >= 60            ? "text-green-500 dark:text-green-400"
+    : composite >= 40            ? "text-yellow-500 dark:text-yellow-400"
+    : "text-red-500 dark:text-red-400";
+  const dim = (name: string, score: number, label: string) =>
+    `  ${name.padEnd(12)} ${String(Math.round(score)).padStart(3)}/100  ${label}`;
+  const tip = [
+    `Composite: ${composite.toFixed(0)}/100   alloc: ${allocationPct.toFixed(1)}%`,
+    ``,
+    dim("Yield",       y,           labels.yield),
+    dim("IL",          il,          labels.il),
+    dim("Liquidity",   liquidity,   labels.liquidity),
+    dim("Volatility",  volatility,  labels.volatility),
+    dim("Token Risk",  tokenRisk,   labels.tokenRisk),
+    dim("Gas",         gas,         labels.gas),
+    dim("Correlation", correlation, labels.correlation),
+    dim("Regime",      regime,      labels.regime),
+  ].join("\n");
+  return (
+    <Tooltip text={tip}>
+      <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
+        {composite.toFixed(0)}
+      </span>
+    </Tooltip>
   );
 }
 
