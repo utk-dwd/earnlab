@@ -169,6 +169,12 @@ export function createApiServer(
     res.json({ count: portfolio.getTrades().length, data: portfolio.getTrades() });
   });
 
+  // ── GET /portfolio/decisions ──────────────────────────────────────────────────
+  app.get("/portfolio/decisions", (req: Request, res: Response) => {
+    const limit = Math.min(Number(req.query.limit ?? 20), 50);
+    res.json({ data: portfolio.getDecisionHistory(limit) });
+  });
+
   // ── GET /reflections ─────────────────────────────────────────────────────────
   app.get("/reflections", (_req: Request, res: Response) => {
     const store = reflection.getStore();

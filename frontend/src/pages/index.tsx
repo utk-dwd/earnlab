@@ -5,14 +5,17 @@ import Head from "next/head";
 import { YieldTable }         from "../components/YieldTable";
 import { PositionsTable }     from "../components/PositionsTable";
 import { ReflectionSidebar }  from "../components/ReflectionSidebar";
+import { DecisionFeed }       from "../components/DecisionFeed";
 import type { RankedOpportunity, PortfolioSummary, MockPosition } from "../types/api";
 
 const API = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:3001";
 
-type Tab = "yields" | "positions";
+type Tab       = "yields" | "positions";
+type SidePanel = "decisions" | "reflections";
 
 export default function Dashboard() {
   const [tab,       setTab]       = useState<Tab>("yields");
+  const [sidePanel, setSidePanel] = useState<SidePanel>("decisions");
   const [yields,    setYields]    = useState<RankedOpportunity[]>([]);
   const [positions, setPositions] = useState<MockPosition[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
@@ -111,11 +114,7 @@ export default function Dashboard() {
                   value={`$${portfolio.unrealizedPnlUsd.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                   positive={portfolio.unrealizedPnlUsd >= 0}
                 />
-                <StatCard
-                  label="AI Mode"
-                  value={portfolio.llmEnabled ? "LLM ✓" : "Rules"}
-                  positive={portfolio.llmEnabled}
-                />
+                <LastDecisionBadge portfolio={portfolio} />
               </div>
             )}
 
@@ -156,10 +155,34 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* ── Reflection sidebar ── */}
+          {/* ── Right sidebar ── */}
           <div className="hidden lg:flex flex-col w-72 xl:w-80 flex-shrink-0">
             <div className="sticky top-6 flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-4 h-[calc(100vh-7rem)] overflow-hidden">
-              <ReflectionSidebar apiUrl={API} />
+              {/* Sidebar tab strip */}
+              <div className="flex gap-1 mb-3 flex-shrink-0 border-b border-gray-200 dark:border-gray-700 pb-2">
+                <button
+                  onClick={() => setSidePanel("decisions")}
+                  className={`flex-1 text-xs py-1 rounded-t font-medium transition-colors ${
+                    sidePanel === "decisions"
+                      ? "text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-600 dark:border-indigo-400"
+                      : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                  }`}
+                >
+                  Decisions
+                </button>
+                <button
+                  onClick={() => setSidePanel("reflections")}
+                  className={`flex-1 text-xs py-1 rounded-t font-medium transition-colors ${
+                    sidePanel === "reflections"
+                      ? "text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-600 dark:border-indigo-400"
+                      : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                  }`}
+                >
+                  Reflections
+                </button>
+              </div>
+              {sidePanel === "decisions"  && <DecisionFeed      apiUrl={API} />}
+              {sidePanel === "reflections" && <ReflectionSidebar apiUrl={API} />}
             </div>
           </div>
 
@@ -195,6 +218,51 @@ function StatCard({ label, value, positive }: { label: string; value: string; po
       }`}>
         {value}
       </p>
+    </div>
+  );
+}
+
+const ACTION_COLORS: Record<string, string> = {
+  enter:     "text-green-600 dark:text-green-400",
+  exit:      "text-red-500   dark:text-red-400",
+  rebalance: "text-blue-600  dark:text-blue-400",
+  hold:      "text-gray-500  dark:text-gray-400",
+  wait:      "text-amber-500 dark:text-amber-400",
+};
+
+function LastDecisionBadge({ portfolio }: { portfolio: PortfolioSummary }) {
+  const d   = portfolio.lastDecision;
+  const at  = portfolio.lastDecisionAt;
+  const pct = d ? Math.round(d.confidence * 100) : null;
+
+  return (
+    <div className="rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 px-4 py-3 col-span-2 sm:col-span-1">
+      <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+        {portfolio.llmEnabled ? "Last Decision" : "Mode"}
+      </p>
+      {!portfolio.llmEnabled ? (
+        <p className="text-lg font-bold text-gray-500">Rules</p>
+      ) : !d ? (
+        <p className="text-sm text-gray-400 italic">pending…</p>
+      ) : (
+        <div>
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-bold uppercase ${ACTION_COLORS[d.action] ?? ""}`}>
+              {d.action}
+            </span>
+            {pct !== null && (
+              <span className={`text-xs font-medium ${pct >= 75 ? "text-green-600 dark:text-green-400" : "text-amber-500"}`}>
+                {pct}%
+              </span>
+            )}
+          </div>
+          {at && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+              {new Date(at).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" })}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

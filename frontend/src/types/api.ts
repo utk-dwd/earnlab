@@ -122,6 +122,22 @@ export interface PortfolioTrade {
   reason:       string;
 }
 
+export interface AgentDecision {
+  action:         "enter" | "exit" | "rebalance" | "hold" | "wait";
+  pool?:          string;
+  allocationPct?: number;
+  confidence:     number;
+  reasoning:      string;
+  exitCondition?: string;
+}
+
+export interface DecisionCycle {
+  decisions:  AgentDecision[];
+  reasoning:  string;
+  timestamp:  number;
+  rawTokens:  number;
+}
+
 export interface PortfolioSummary {
   totalCapitalUsd:        number;
   cashUsd:                number;
@@ -136,13 +152,16 @@ export interface PortfolioSummary {
   tradeCount:             number;
   lastRebalanceTimestamp: number | null;
   llmEnabled:             boolean;
+  lastDecision:           AgentDecision | null;
+  lastDecisionAt:         number | null;
 }
 
-export interface YieldsResponse     { count: number; data: RankedOpportunity[] }
-export interface PositionsResponse  { data: Position[] }
-export interface ExecutionsResponse { count: number; data: Execution[] }
+export interface YieldsResponse          { count: number; data: RankedOpportunity[] }
+export interface PositionsResponse       { data: Position[] }
+export interface ExecutionsResponse      { count: number; data: Execution[] }
 export interface PortfolioPositionsResponse { data: MockPosition[] }
 export interface PortfolioTradesResponse    { count: number; data: PortfolioTrade[] }
+export interface PortfolioDecisionsResponse { data: DecisionCycle[] }
 
 export interface Reflection {
   id:        number;

@@ -1,6 +1,7 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import { LLMClient }    from "./llm/LLMClient";
+import type { AgentDecision, DecisionCycle } from "./llm/LLMClient";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const INITIAL_CAPITAL_USD = 10_000;
@@ -9,9 +10,11 @@ const TARGET_POSITIONS    = 4;      // aim for this many concurrent positions
 const REBALANCE_THRESHOLD = 0.30;   // candidate must have 30% better RAR7d to trigger
 const MIN_HOLD_HOURS      = 24;     // never rebalance a position younger than this
 const MAX_BREAKEVEN_DAYS  = 7;      // only rebalance if fee recovers within this many days
-const ENTRY_FEE_PCT       = 0.001;  // 0.1% simulated swap cost to enter
-const EXIT_FEE_PCT        = 0.001;  // 0.1% simulated swap cost to exit
-const CHECK_INTERVAL_MS   = 5 * 60_000;
+const ENTRY_FEE_PCT        = 0.001;  // 0.1% simulated swap cost to enter
+const EXIT_FEE_PCT         = 0.001;  // 0.1% simulated swap cost to exit
+const CHECK_INTERVAL_MS    = 5 * 60_000;
+const CONFIDENCE_THRESHOLD = 0.75;
+const DECISION_HISTORY_MAX = 50;
 
 let _seq = 0;
 const nextId = () => `${Date.now()}-${++_seq}`;
@@ -70,7 +73,11 @@ export interface PortfolioSummary {
   tradeCount:             number;
   lastRebalanceTimestamp: number | null;
   llmEnabled:             boolean;
+  lastDecision:           AgentDecision | null;
+  lastDecisionAt:         number | null;
 }
+
+export type { AgentDecision, DecisionCycle };
 
 // ─── PortfolioManager ─────────────────────────────────────────────────────────
 
@@ -83,9 +90,11 @@ export class PortfolioManager {
   private lastRebalance: number | null = null;
   private running        = false;
 
-  private memory:    ZeroGMemory;
-  private llm:       LLMClient | null = null;
-  private llmReady   = false;
+  private memory:          ZeroGMemory;
+  private llm:             LLMClient | null = null;
+  private llmReady         = false;
+  private lastCycle:       DecisionCycle | null = null;
+  private decisionHistory: DecisionCycle[] = [];
 
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
@@ -100,12 +109,7 @@ export class PortfolioManager {
 
     // Wire up LLM client if OPENROUTER_API_KEY is set
     if (process.env.OPENROUTER_API_KEY) {
-      const llm = new LLMClient(this.memory);
-      llm.onListOpportunities  = (limit, minRar7d, network) => this.toolListOpps(limit, minRar7d, network);
-      llm.onGetPortfolioState  = () => this.toolGetState();
-      llm.onOpenPosition       = (poolId, reason) => this.toolOpen(poolId, reason);
-      llm.onClosePosition      = (poolId, reason) => this.toolClose(poolId, reason);
-      this.llm      = llm;
+      this.llm      = new LLMClient(this.memory);
       this.llmReady = true;
       console.log(`[Portfolio] LLM enabled — model: ${process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324"}`);
     } else {
@@ -141,35 +145,78 @@ export class PortfolioManager {
 
   // ─── LLM-driven decision ─────────────────────────────────────────────────
   private async thinkWithLLM(trigger: "deploy" | "rebalance"): Promise<void> {
-    console.log(`[Portfolio] LLM thinking (${trigger})…`);
+    console.log(`[Portfolio] LLM deciding (${trigger})…`);
     try {
-      const result = await this.llm!.think(trigger);
-      console.log(`[Portfolio] LLM completed — ${result.actions.length} actions, ${result.rawTokens} tokens`);
-      if (result.reasoning) console.log(`[Portfolio] LLM reasoning: ${result.reasoning}`);
+      const opps               = this.toolListOpps(15);
+      const { summary, positions } = this.toolGetState();
 
-      // Persist the session to 0G memory
-      const holds = result.actions.filter(a => a.type === "hold");
-      const opens = result.actions.filter(a => a.type === "open");
-      const closes = result.actions.filter(a => a.type === "close");
+      const cycle = await this.llm!.decide(opps, summary, positions);
 
-      const summary = holds.length > 0 ? holds[0] : result.actions[result.actions.length - 1];
-      if (summary) {
+      // Store in ring buffer
+      this.lastCycle = cycle;
+      this.decisionHistory.unshift(cycle);
+      if (this.decisionHistory.length > DECISION_HISTORY_MAX) {
+        this.decisionHistory.length = DECISION_HISTORY_MAX;
+      }
+
+      console.log(`[Portfolio] LLM: ${cycle.decisions.length} decision(s) | ${cycle.rawTokens} tokens`);
+      if (cycle.reasoning) console.log(`[Portfolio] LLM reasoning: ${cycle.reasoning}`);
+
+      for (const d of cycle.decisions) {
+        const tag = `${d.action}${d.pool ? ` pool=${d.pool.slice(0, 10)}…` : ""} conf=${d.confidence.toFixed(2)}`;
+        if (d.confidence < CONFIDENCE_THRESHOLD) {
+          console.log(`[Portfolio] Skip (low confidence): ${tag} — ${d.reasoning}`);
+          continue;
+        }
+        console.log(`[Portfolio] Execute: ${tag} — ${d.reasoning}`);
+        this.executeDecision(d);
+      }
+
+      // Persist primary (non-hold) decision to 0G memory
+      const primary = cycle.decisions.find(d => d.action !== "hold" && d.action !== "wait")
+        ?? cycle.decisions[0];
+      if (primary) {
         await this.memory.append({
-          timestamp: Date.now(),
-          action:    summary.type as any,
-          poolId:    (summary as any).poolId,
-          reasoning: result.reasoning || summary.reason,
+          timestamp: cycle.timestamp,
+          action:    primary.action as any,
+          poolId:    primary.pool,
+          reasoning: cycle.reasoning || primary.reasoning,
         });
       }
 
       this.lastRebalance = Date.now();
     } catch (err: any) {
       console.warn(`[Portfolio] LLM failed (${err.message}), falling back to rule-based`);
-      if (trigger === "deploy") {
-        this.deploy();
-      } else {
-        this.rebalance();
+      if (trigger === "deploy") this.deploy();
+      else                      this.rebalance();
+    }
+  }
+
+  private executeDecision(d: AgentDecision): void {
+    switch (d.action) {
+      case "enter":
+        if (d.pool) this.toolOpen(d.pool, d.reasoning, d.allocationPct);
+        break;
+
+      case "exit":
+        if (d.pool) this.toolClose(d.pool, d.reasoning);
+        break;
+
+      case "rebalance": {
+        // Close weakest current position, then enter the target pool
+        const worst = this.openList()
+          .sort((a, b) => a.pnlPct - b.pnlPct)[0];
+        if (worst) {
+          this.toolClose(worst.poolId, `Rebalancing into ${d.pool}: ${d.reasoning}`);
+        }
+        if (d.pool) this.toolOpen(d.pool, d.reasoning, d.allocationPct);
+        break;
       }
+
+      case "hold":
+      case "wait":
+        // intentional no-op
+        break;
     }
   }
 
@@ -192,27 +239,31 @@ export class PortfolioManager {
     };
   }
 
-  private toolOpen(poolId: string, reason: string): boolean {
+  private toolOpen(poolId: string, reason: string, allocationPct?: number): boolean {
     const open = this.openList();
     if (open.length >= TARGET_POSITIONS) {
-      console.log(`[Portfolio] LLM open rejected — already at max positions (${TARGET_POSITIONS})`);
+      console.log(`[Portfolio] open rejected — already at max positions (${TARGET_POSITIONS})`);
       return false;
     }
     const opp = this.reporter.getLatest().find(o => o.poolId === poolId);
     if (!opp) {
-      console.log(`[Portfolio] LLM open rejected — pool ${poolId} not found`);
+      console.log(`[Portfolio] open rejected — pool ${poolId} not found`);
       return false;
     }
     if (this.positions.has(poolId) && this.positions.get(poolId)!.status === "open") {
-      console.log(`[Portfolio] LLM open rejected — already in pool ${poolId}`);
+      console.log(`[Portfolio] open rejected — already in pool ${poolId}`);
       return false;
     }
 
-    const n   = open.length + 1;
-    const pct = Math.min(MAX_POSITION_PCT, 1 / n);
+    // Use LLM-requested allocation if provided and within bounds; else default 1/n
+    const defaultPct = Math.min(MAX_POSITION_PCT, 1 / (open.length + 1));
+    const pct = allocationPct != null
+      ? Math.min(allocationPct / 100, MAX_POSITION_PCT)
+      : defaultPct;
+
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason);
     this.lastRebalance = Date.now();
-    console.log(`[Portfolio] LLM opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
+    console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
     return true;
   }
 
@@ -224,11 +275,11 @@ export class PortfolioManager {
     }
     const hoursHeld = (Date.now() - pos.entryTimestamp) / 3_600_000;
     if (hoursHeld < MIN_HOLD_HOURS) {
-      console.log(`[Portfolio] LLM close rejected — ${pos.pair} only held ${hoursHeld.toFixed(1)}h (min ${MIN_HOLD_HOURS}h)`);
+      console.log(`[Portfolio] close rejected — ${pos.pair} only held ${hoursHeld.toFixed(1)}h (min ${MIN_HOLD_HOURS}h)`);
       return false;
     }
-    const proceeds = this.exit(pos, reason); // exit() already does this.cash += proceeds
-    console.log(`[Portfolio] LLM closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
+    const proceeds = this.exit(pos, reason);
+    console.log(`[Portfolio] closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
     return true;
   }
 
@@ -386,6 +437,11 @@ export class PortfolioManager {
     const realizedPnlUsd     = closed.reduce((s, p) => s + ((p.closedValueUsd ?? p.entryValueUsd) - p.entryValueUsd), 0);
     const totalEarnedFeesUsd = all.reduce((s, p) => s + p.earnedFeesUsd, 0);
 
+    // Primary decision from the last LLM cycle (first non-hold, or the hold itself)
+    const lastDecision = this.lastCycle?.decisions.find(d => d.action !== "hold" && d.action !== "wait")
+      ?? this.lastCycle?.decisions[0]
+      ?? null;
+
     return {
       totalCapitalUsd:        INITIAL_CAPITAL_USD,
       cashUsd:                +this.cash.toFixed(2),
@@ -400,6 +456,8 @@ export class PortfolioManager {
       tradeCount:             this.trades.length,
       lastRebalanceTimestamp: this.lastRebalance,
       llmEnabled:             this.llmReady,
+      lastDecision,
+      lastDecisionAt:         this.lastCycle?.timestamp ?? null,
     };
   }
 
@@ -410,6 +468,10 @@ export class PortfolioManager {
 
   getTrades(): PortfolioTrade[] {
     return [...this.trades];
+  }
+
+  getDecisionHistory(limit = 20): DecisionCycle[] {
+    return this.decisionHistory.slice(0, limit);
   }
 }
 
