@@ -14,11 +14,32 @@ import { runStressTest, type StressTestResult } from "./calculator/ScenarioStres
 import { computeScorecard, type DecisionScorecard } from "./calculator/DecisionScorecard";
 import { APYHistoryStore } from "./storage/APYHistoryStore";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
+import { SnapshotStore } from "./storage/SnapshotStore";
 import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
 
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
 const TOP_N            = Number(process.env.TOP_N            ?? 20);
 const NETWORK_FILTER   = (process.env.NETWORK_FILTER ?? "all") as "mainnet" | "testnet" | "all";
+
+export type EnrichmentStage =
+  | "enrichRAR"
+  | "capitalEfficiency"
+  | "adverseSelection"
+  | "stressTest"
+  | "scorecard"
+  | "tokenRisk"
+  | "stablecoinRisk";
+
+export interface EnrichmentError {
+  stage:     EnrichmentStage;
+  message:   string;
+  timestamp: number;
+}
+
+interface RankedSnapshot {
+  latest: RankedOpportunity[];
+  savedAt: number;
+}
 
 // ─── Ranked yield opportunity ─────────────────────────────────────────────────
 export interface RankedOpportunity {
@@ -123,6 +144,18 @@ export interface RankedOpportunity {
    * enriches with actual portfolio state via enrichWithPortfolio().
    */
   scorecard:            DecisionScorecard | null;
+  /**
+   * Active Uniswap v4 hook callbacks decoded from the pool's hooks address
+   * (lower 14 bits). Empty array = vanilla pool with no custom logic.
+   * Populated by decodeHookFlags() using @uniswap/v4-sdk hookFlagIndex.
+   */
+  hookFlags:       string[];
+  /** True when the pool has a non-zero hooks contract (custom logic active). */
+  hasCustomHooks:  boolean;
+  /** True when one or more enrichment stages failed for this scan. */
+  enrichmentDegraded: boolean;
+  /** Per-stage enrichment failures surfaced to API/UI consumers. */
+  enrichmentErrors:   EnrichmentError[];
   lastUpdated:   number;
 }
 
@@ -131,11 +164,16 @@ export class ReporterAgent {
   private slippage   = new SlippageGuard();
   private history    = new ExecutionHistory();
   private apyHistory = new APYHistoryStore();
+  private snapshots  = new SnapshotStore();
   private tokenRisk  = new TokenRiskAssessor();
   private stableRisk = new StablecoinRiskAssessor();
   private latest:    RankedOpportunity[] = [];
   private running    = false;
   private scanCount  = 0;
+
+  constructor() {
+    this.restoreLatest();
+  }
 
   async start(): Promise<void> {
     this.running = true;
@@ -148,7 +186,12 @@ export class ReporterAgent {
     }, SCAN_INTERVAL_MS);
   }
 
-  stop(): void { this.running = false; this.history.close(); }
+  stop(): void {
+    this.running = false;
+    this.persistLatest();
+    this.history.close();
+    this.snapshots.close();
+  }
 
   // ─── Scan cycle ───────────────────────────────────────────────────────────
   private async runScan(): Promise<void> {
@@ -168,6 +211,7 @@ export class ReporterAgent {
     // Rank without RAR first (fast), then enrich with RAR async
     const ranked = this.rankBasic(pools).slice(0, TOP_N);
     this.latest  = ranked; // serve immediately without waiting for vol
+    this.persistLatest();
 
     // Record APY snapshots + compute persistence synchronously (SQLite, fast)
     this.enrichPersistence(ranked);
@@ -182,7 +226,11 @@ export class ReporterAgent {
         this.enrichStablecoinRisk(ranked),
       ]))
       .then(() => {
+        this.persistLatest();
         console.log(`[Reporter] RAR + token risk + stable risk enriched for ${ranked.length} pools`);
+      })
+      .catch((err) => {
+        console.error(`[Reporter] Enrichment pipeline failed: ${errorMessage(err)}`);
       });
 
     console.log(`[Reporter] ${pools.length} pools → top ${ranked.length} (${Date.now() - t0}ms)`);
@@ -248,6 +296,10 @@ export class ReporterAgent {
           adverseSelection:     prev?.adverseSelection     ?? null,
           stressTest:           prev?.stressTest           ?? null,
           scorecard:            prev?.scorecard            ?? null,
+          hookFlags:            p.hookFlags      ?? [],
+          hasCustomHooks:       p.hasCustomHooks ?? false,
+          enrichmentDegraded:   false,
+          enrichmentErrors:     [],
           lastUpdated:  p.lastUpdated,
           // stash addresses for RAR calc
           _token0Address: p.poolKey.currency0,
@@ -269,50 +321,65 @@ export class ReporterAgent {
       ranked.map(async (opp) => {
         const r = opp as any; // access stashed fields
         if (!r._token0Address) return;
-        const rar = await computePairRAR({
-          apy:           opp.displayAPY,
-          chainId:       opp.chainId,
-          token0Address: r._token0Address,
-          token1Address: r._token1Address,
-          token0Symbol:  r._token0Symbol,
-          token1Symbol:  r._token1Symbol,
-        });
-        opp.rar24h             = rar.rar24h;
-        opp.rar7d              = rar.rar7d;
-        opp.vol24h             = rar.vol24h;
-        opp.vol7d              = rar.vol7d;
-        opp.rarQuality         = rar.quality;
-        opp.token0PriceChange24h = rar.token0PriceChange24h;
-        opp.token0PriceChange7d  = rar.token0PriceChange7d;
-        opp.token1PriceChange24h = rar.token1PriceChange24h;
-        opp.token1PriceChange7d  = rar.token1PriceChange7d;
-        opp.pairPriceChange24h = rar.pairPriceChange24h;
-        opp.pairPriceChange7d  = rar.pairPriceChange7d;
-        // IL = 0.5 × σ² (annualised). vol7d is in %, so divide by 100 first.
-        opp.expectedIL = rar.vol7d > 0 ? 0.5 * (rar.vol7d / 100) ** 2 * 100 : 0;
-        opp.netAPY     = opp.displayAPY - opp.expectedIL;
-        // Recompute LQ now that vol7d is available (depth component becomes accurate)
-        opp.liquidityQuality = computeLiquidityQuality(
-          opp.tvlUsd, opp.volume24hUsd, opp.feeTier,
-          opp.liveAPY, opp.referenceAPY, opp.apySource,
-          opp.vol7d,
-        ).score;
-        // Capital efficiency and adverse selection — run in parallel (both hit price cache)
-        const [ce, adv] = await Promise.all([
-          computeCapitalEfficiency({
+
+        try {
+          const rar = await computePairRAR({
+            apy:           opp.displayAPY,
             chainId:       opp.chainId,
             token0Address: r._token0Address,
-            token0Symbol:  r._token0Symbol,
             token1Address: r._token1Address,
+            token0Symbol:  r._token0Symbol,
             token1Symbol:  r._token1Symbol,
-            vol7d:         opp.vol7d,
-            liveAPY:       opp.liveAPY,
-            referenceAPY:  opp.referenceAPY,
-            tvlUsd:        opp.tvlUsd,
-            volume24hUsd:  opp.volume24hUsd,
-            netAPY:        opp.netAPY,
-          }),
-          detectAdverseSelection({
+          });
+          opp.rar24h             = rar.rar24h;
+          opp.rar7d              = rar.rar7d;
+          opp.vol24h             = rar.vol24h;
+          opp.vol7d              = rar.vol7d;
+          opp.rarQuality         = rar.quality;
+          opp.token0PriceChange24h = rar.token0PriceChange24h;
+          opp.token0PriceChange7d  = rar.token0PriceChange7d;
+          opp.token1PriceChange24h = rar.token1PriceChange24h;
+          opp.token1PriceChange7d  = rar.token1PriceChange7d;
+          opp.pairPriceChange24h = rar.pairPriceChange24h;
+          opp.pairPriceChange7d  = rar.pairPriceChange7d;
+          // IL = 0.5 × sigma^2 (annualised). vol7d is in %, so divide by 100 first.
+          opp.expectedIL = rar.vol7d > 0 ? 0.5 * (rar.vol7d / 100) ** 2 * 100 : 0;
+          opp.netAPY     = opp.displayAPY - opp.expectedIL;
+          // Recompute LQ now that vol7d is available (depth component becomes accurate)
+          opp.liquidityQuality = computeLiquidityQuality(
+            opp.tvlUsd, opp.volume24hUsd, opp.feeTier,
+            opp.liveAPY, opp.referenceAPY, opp.apySource,
+            opp.vol7d,
+          ).score;
+        } catch (err) {
+          markEnrichmentFailed("enrichRAR", opp, err);
+        }
+
+        try {
+          const ce = await computeCapitalEfficiency({
+            chainId:            opp.chainId,
+            token0Address:      r._token0Address,
+            token0Symbol:       r._token0Symbol,
+            token1Address:      r._token1Address,
+            token1Symbol:       r._token1Symbol,
+            vol7d:              opp.vol7d,
+            liveAPY:            opp.liveAPY,
+            referenceAPY:       opp.referenceAPY,
+            tvlUsd:             opp.tvlUsd,
+            volume24hUsd:       opp.volume24hUsd,
+            netAPY:             opp.netAPY,
+          });
+          opp.timeInRangePct       = ce.timeInRangePct;
+          opp.feeCaptureEfficiency = ce.feeCaptureEfficiency;
+          opp.capitalUtilization   = ce.capitalUtilization;
+          opp.effectiveNetAPY      = ce.effectiveNetAPY;
+          opp.halfRangePct         = ce.halfRangePct;
+        } catch (err) {
+          markEnrichmentFailed("capitalEfficiency", opp, err);
+        }
+
+        try {
+          const adv = await detectAdverseSelection({
             chainId:            opp.chainId,
             token0Address:      r._token0Address,
             token0Symbol:       r._token0Symbol,
@@ -325,36 +392,43 @@ export class ReporterAgent {
             tvlUsd:             opp.tvlUsd,
             volume24hUsd:       opp.volume24hUsd,
             pairPriceChange24h: opp.pairPriceChange24h,
-          }),
-        ]);
-        opp.timeInRangePct       = ce.timeInRangePct;
-        opp.feeCaptureEfficiency = ce.feeCaptureEfficiency;
-        opp.capitalUtilization   = ce.capitalUtilization;
-        opp.effectiveNetAPY      = ce.effectiveNetAPY;
-        opp.halfRangePct         = ce.halfRangePct;
-        opp.adverseSelection     = adv;
-        if (adv.quality === "high" || adv.quality === "elevated") {
-          console.log(`[Reporter] Adverse selection ${adv.quality}: ${opp.pair} score=${adv.score} — ${adv.flags[0] ?? ""}`);
+          });
+          opp.adverseSelection = adv;
+          if (adv.quality === "high" || adv.quality === "elevated") {
+            console.log(`[Reporter] Adverse selection ${adv.quality}: ${opp.pair} score=${adv.score} — ${adv.flags[0] ?? ""}`);
+          }
+        } catch (err) {
+          markEnrichmentFailed("adverseSelection", opp, err);
         }
-        // Stress test: synchronous — all inputs are already available
-        const isStablePool = !!(opp.stablecoinRisk?.isStablePool);
-        opp.stressTest = runStressTest({  // eslint-disable-line no-case-declarations
-          chainId:              opp.chainId,
-          vol7d:                opp.vol7d,
-          displayAPY:           opp.displayAPY,
-          medianAPY7d:          opp.medianAPY7d,
-          apyPersistence:       opp.apyPersistence,
-          timeInRangePct:       opp.timeInRangePct,
-          feeCaptureEfficiency: opp.feeCaptureEfficiency,
-          expectedIL:           opp.expectedIL,
-          netAPY:               opp.netAPY,
-          effectiveNetAPY:      opp.effectiveNetAPY,
-          tvlUsd:               opp.tvlUsd,
-          volume24hUsd:         opp.volume24hUsd,
-          isStablePool,
-        });
-        // Scorecard: standalone (correlation=50, regime=75 until PM enriches)
-        opp.scorecard = computeScorecard(opp);
+
+        try {
+          // Stress test: synchronous — all inputs are already available
+          const isStablePool = !!(opp.stablecoinRisk?.isStablePool);
+          opp.stressTest = runStressTest({
+            chainId:              opp.chainId,
+            vol7d:                opp.vol7d,
+            displayAPY:           opp.displayAPY,
+            medianAPY7d:          opp.medianAPY7d,
+            apyPersistence:       opp.apyPersistence,
+            timeInRangePct:       opp.timeInRangePct,
+            feeCaptureEfficiency: opp.feeCaptureEfficiency,
+            expectedIL:           opp.expectedIL,
+            netAPY:               opp.netAPY,
+            effectiveNetAPY:      opp.effectiveNetAPY,
+            tvlUsd:               opp.tvlUsd,
+            volume24hUsd:         opp.volume24hUsd,
+            isStablePool,
+          });
+        } catch (err) {
+          markEnrichmentFailed("stressTest", opp, err);
+        }
+
+        try {
+          // Scorecard: standalone (correlation=50, regime=75 until PM enriches)
+          opp.scorecard = computeScorecard(opp);
+        } catch (err) {
+          markEnrichmentFailed("scorecard", opp, err);
+        }
       })
     );
     // Re-sort: LQ × persistence × capitalUtilization × (1 − advPenalty) × (1 − stressPenalty)
@@ -413,8 +487,8 @@ export class ReporterAgent {
           }
           // Refresh scorecard tokenRisk dimension now that real data is available
           if (opp.scorecard) opp.scorecard = computeScorecard(opp);
-        } catch {
-          // leave tokenRisk unchanged
+        } catch (err) {
+          markEnrichmentFailed("tokenRisk", opp, err);
         }
       })
     );
@@ -443,8 +517,8 @@ export class ReporterAgent {
           } else if (result && result.compositeScore > 40) {
             console.log(`[Reporter] Stable risk advisory: ${opp.pair} score=${result.compositeScore} — ${result.flags.join("; ")}`);
           }
-        } catch {
-          // leave stablecoinRisk unchanged
+        } catch (err) {
+          markEnrichmentFailed("stablecoinRisk", opp, err);
         }
       })
     );
@@ -482,4 +556,44 @@ export class ReporterAgent {
   getSlippageGuard(){ return this.slippage; }
   getHistoryStore() { return this.history; }
   async checkSlippage(params: Parameters<SlippageGuard["check"]>[0]) { return this.slippage.check(params); }
+
+  private restoreLatest(): void {
+    try {
+      const snapshot = this.snapshots.load<RankedSnapshot>("ranked.latest");
+      if (snapshot?.latest?.length) {
+        this.latest = snapshot.latest;
+        console.log(`[Reporter] Restored ${this.latest.length} ranked opportunities from SQLite snapshot`);
+      }
+    } catch (err) {
+      console.warn(`[Reporter] Failed to restore ranked snapshot: ${errorMessage(err)}`);
+    }
+  }
+
+  private persistLatest(): void {
+    try {
+      this.snapshots.save<RankedSnapshot>("ranked.latest", {
+        latest: this.latest,
+        savedAt: Date.now(),
+      });
+    } catch (err) {
+      console.warn(`[Reporter] Failed to persist ranked snapshot: ${errorMessage(err)}`);
+    }
+  }
+}
+
+function markEnrichmentFailed(stage: EnrichmentStage, opp: RankedOpportunity, err: unknown): void {
+  const message = errorMessage(err);
+  opp.enrichmentDegraded = true;
+  opp.enrichmentErrors.push({ stage, message, timestamp: Date.now() });
+  console.warn(`[${stage}] pool ${opp.poolId} failed: ${message}`);
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }

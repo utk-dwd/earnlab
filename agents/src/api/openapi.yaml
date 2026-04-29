@@ -365,6 +365,20 @@ components:
         rarQuality:    { type: string, enum: [excellent, good, fair, poor, "n/a"], description: "excellent ≥2.0 / good ≥1.0 / fair ≥0.5 / poor <0.5" }
         pairPriceChange24h: { type: number, description: "token0/token1 exchange-rate change over 24 h" }
         pairPriceChange7d:  { type: number, description: "token0/token1 exchange-rate change over 7 d" }
+        enrichmentDegraded:
+          type: boolean
+          description: "True when one or more enrichment stages failed for this pool during the latest scan."
+        enrichmentErrors:
+          type: array
+          description: "Per-stage enrichment failures for this pool during the latest scan."
+          items:
+            type: object
+            properties:
+              stage:
+                type: string
+                enum: [enrichRAR, capitalEfficiency, adverseSelection, stressTest, scorecard, tokenRisk, stablecoinRisk]
+              message:   { type: string }
+              timestamp: { type: integer, description: "Unix ms timestamp when the enrichment failure was recorded" }
         lastUpdated:   { type: integer, description: "Unix ms timestamp of last scan" }
 
     Position:

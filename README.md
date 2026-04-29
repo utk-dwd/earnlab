@@ -49,6 +49,15 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 - Estimates **Impermanent Loss** and **Net APY** (`feeAPY − expectedIL`)
 - Slippage guard: rejects pools where a simulated swap exceeds configured basis points
 
+### Enrichment observability
+Each pool enrichment stage is isolated. A failure in one stage logs the exact pool and stage, for example:
+
+```
+[enrichRAR] pool 0x... failed: Too Many Requests
+```
+
+The affected opportunity is marked `enrichmentDegraded=true` and exposes `enrichmentErrors[]` through the API. The dashboard shows a `degraded` badge beside the pair with the failed stage and error message on hover, so null scorecards or missing risk fields are no longer silent.
+
 ### Capital efficiency
 Every pool is scored on how much of its stated APY is realistically capturable:
 
@@ -210,6 +219,14 @@ value: { pool, pair, conditions: {rar7d, vol7d, change7d}, decision, outcome }
 ### Reflection agent
 Runs hourly. Streams a 1–5 sentence LLM reflection on current opportunities and portfolio performance via Server-Sent Events. Each reflection is persisted in SQLite and surfaced in the UI sidebar. Past reflections are passed as context for future reflections.
 
+### SQLite state snapshots
+In addition to APY history, execution history, and reflections, the agent persists restart-critical state to SQLite:
+
+- `ranked.latest` — latest ranked opportunity snapshot, saved before and after async enrichment
+- `portfolio.state` — cash, positions, trade log, fees paid, last rebalance, regime, last LLM cycle, and decision history
+
+Snapshots are stored in `agents/data/snapshots.db`. On restart, `ReporterAgent` hydrates the latest ranked list before the first scan completes, and `PortfolioManager` resumes the simulated portfolio from the last persisted state transition.
+
 ---
 
 ## Supported chains
@@ -288,7 +305,7 @@ npm run start:testnet   # testnet only
 npm run dev             # hot-reload for development
 ```
 
-The agent starts on **port 3001**. Enrichment is asynchronous — LQ, Eff. APY, T.Risk, Adv.Sel, Stress, and Score columns populate over the first 1–2 minutes per pool. APY Persistence requires 6+ hours of history to accumulate.
+The agent starts on **port 3001**. Enrichment is asynchronous — LQ, Eff. APY, T.Risk, Adv.Sel, Stress, and Score columns populate over the first 1–2 minutes per pool. If an enrichment stage fails, the pool is marked degraded and the stage error is logged and exposed in the API. APY Persistence requires 6+ hours of history to accumulate.
 
 ### 4. Start the frontend
 
@@ -366,7 +383,8 @@ earnYld/
 │       ├── storage/
 │       │   ├── ZeroGMemory.ts                # 0G KV episodic memory (RAG)
 │       │   ├── ReflectionStore.ts            # SQLite reflection persistence
-│       │   └── ExecutionHistory.ts           # SQLite execution log
+│       │   ├── ExecutionHistory.ts           # SQLite execution log
+│       │   └── SnapshotStore.ts              # SQLite ranked + portfolio snapshots
 │       ├── api/
 │       │   └── server.ts                     # Express REST + SSE endpoints
 │       └── config/
@@ -378,7 +396,7 @@ earnYld/
         │   ├── index.tsx                     # Main dashboard
         │   └── docs.tsx                      # Swagger UI
         ├── components/
-        │   ├── YieldTable.tsx                # 22-column ranked pool table
+        │   ├── YieldTable.tsx                # 23-column ranked pool table
         │   ├── PositionsTable.tsx            # Positions with TiR, exit alerts
         │   ├── DecisionFeed.tsx              # LLM decisions + Critic verdict
         │   └── ReflectionSidebar.tsx         # SSE-streamed hourly reflections
@@ -406,6 +424,7 @@ earnYld/
 | `ZEROG_STREAM_ID` | (hardcoded default) | 0G KV stream for decision records |
 | `MAX_SLIPPAGE_BPS` | `50` | Slippage guard threshold (0.5%) |
 | `NEXT_PUBLIC_AGENT_API_URL` | `http://localhost:3001` | Frontend → agent URL |
+| `THEGRAPH_API_KEY` | — | Enables The Graph Uniswap v4 subgraph enrichment |
 
 ---
 
@@ -434,6 +453,134 @@ OPEN POSITIONS:
 PAST OUTCOMES — similar conditions (0G memory):
   [Apr 15] enter USDC/ETH on Base | rar=7.2 vol=38% → 3.1d | APY=134% ret=+$52 ✓
 ```
+
+---
+
+## Built with Uniswap ecosystem
+
+EarnYld integrates the Uniswap v4 protocol and SDK stack at every layer of the agent — from pool discovery to position sizing to UI display.
+
+### `@uniswap/v4-sdk` — Hook flag decoding
+
+Every pool returned by the scanner is analysed for active hook callbacks using the SDK's `hookFlagIndex` map.
+
+```typescript
+import { hookFlagIndex } from "@uniswap/v4-sdk";
+
+export function decodeHookFlags(hooksAddress: string): string[] {
+  const addrNum = BigInt(hooksAddress);
+  return Object.entries(hookFlagIndex)
+    .filter(([, bit]) => (addrNum >> BigInt(bit)) & 1n)
+    .map(([name]) => name);
+}
+```
+
+In Uniswap v4, the hooks contract address is mined so that its lower 14 bits encode which of the 14 hook points (`beforeSwap`, `afterSwap`, `beforeAddLiquidity`, etc.) are implemented. `decodeHookFlags` reads these bits using the SDK's authoritative bit-position map and returns the list of active callbacks. The frontend displays this per-pool as a 🔵 badge with a tooltip listing all active callbacks.
+
+### `@uniswap/v4-sdk` — Pool key and pool ID
+
+Pool IDs in Uniswap v4 are the keccak256 of the ABI-encoded pool key `(currency0, currency1, fee, tickSpacing, hooks)`. The scanner replicates the on-chain `PoolManager.toId()` logic exactly:
+
+```typescript
+export function computePoolId(key: PoolKey): `0x${string}` {
+  return keccak256(
+    encodeAbiParameters(
+      parseAbiParameters("address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks"),
+      [key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks]
+    )
+  );
+}
+```
+
+This is used for both onchain pool state reads (via `StateView`) and for joining DefiLlama data to live chain data.
+
+### `@uniswap/v3-sdk` — Tick math for position range sizing
+
+Position tick ranges are computed using the same log-base-1.0001 tick math used by all Uniswap concentrated liquidity pools. The portfolio manager uses `nearestUsableTick` and `TickMath` from the v3 SDK (re-exported as a transitive dependency of `@uniswap/v4-sdk`):
+
+```typescript
+import { nearestUsableTick, TickMath } from "@uniswap/v3-sdk";
+
+function computeTickRange(opp: RankedOpportunity) {
+  const halfRangePct = (opp.vol7d || 5) * 2;          // ±2σ covers ~95% of 7d moves
+  const rawHalfTicks = Math.log(1 + halfRangePct / 100) / Math.log(1.0001);
+  const spacing      = TICK_SPACINGS[opp.feeTier] ?? 60;
+  // nearestUsableTick validates against tick spacing; ceil ensures conservative range
+  const rawCeiled    = Math.ceil(rawHalfTicks / spacing) * spacing;
+  const halfTicks    = Math.min(nearestUsableTick(rawCeiled, spacing), TickMath.MAX_TICK);
+  return { tickLower: -halfTicks, tickUpper: halfTicks, halfRangePct };
+}
+```
+
+This ensures every position range is aligned to the pool's tick spacing, within `TickMath.MIN_TICK` / `MAX_TICK` (±887272), and consistent with how Uniswap v4 validates tick bounds on-chain.
+
+### `viem` — On-chain pool state reads
+
+The scanner uses `viem` (the transport library used by Uniswap's own tooling) to:
+- Watch `Initialize` events from the v4 `PoolManager` contract to discover new pools
+- Watch `Swap` events to compute 24h volume
+- Call the v4 `StateView` contract (`getSlot0`, `getLiquidity`) for live price and liquidity
+
+```typescript
+const INITIALIZE_EVENT = parseAbiItem(
+  "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
+);
+```
+
+### The Graph — Uniswap v4 subgraph (optional enrichment)
+
+When a `THEGRAPH_API_KEY` is configured, the scanner queries The Graph's Uniswap v4 subgraph for per-pool TVL, volume, and transaction count. This supplements on-chain `StateView` reads with historical aggregated data and serves as a fallback for chains where RPC event scanning is rate-limited.
+
+```typescript
+// agents/src/scanner/UniswapV4Scanner.ts
+const THEGRAPH_SUBGRAPH: Partial<Record<number, string>> = {
+  1:    "GqzP4Xaehti8KSfQmv3ZctFSjnSUYZ4En5NRsiTbvZpz",  // Ethereum mainnet
+  8453: "HMuAwufqZ1YCRmzL2NcL8A9F5e5JmFNLFRFiSnMjnFqX",  // Base
+};
+```
+
+Set `THEGRAPH_API_KEY` in `.env` to enable. The integration degrades gracefully — if the key is absent or the query fails, the agent continues using DefiLlama data.
+
+### uniswap-ai Claude Code skills
+
+The [uniswap-ai](https://github.com/Uniswap/uniswap-ai) repository provides Claude Code skills for Uniswap v4 development. Add them to your Claude Code environment:
+
+```bash
+npx skills add Uniswap/uniswap-ai
+```
+
+Available skills:
+| Skill | Used for |
+|---|---|
+| `v4-sdk-integration` | Pool construction, tick math, position encoding |
+| `liquidity-planner` | Optimal tick range selection from volatility data |
+| `v4-hook-generator` | Scaffolding custom hook contracts |
+| `swap-planner` | Universal Router calldata encoding |
+| `viem-integration` | Type-safe contract reads/writes with viem |
+| `swap-integration` | Token approval flow via Permit2 |
+| `v4-security-foundations` | Reentrancy, callback trust, hook address validation |
+| `configurator` | Pool deployment configuration |
+
+### Chain coverage
+
+EarnYld monitors 14 Uniswap v4 mainnet deployments:
+
+| Chain | Chain ID |
+|---|---|
+| Ethereum | 1 |
+| Unichain | 130 |
+| Base | 8453 |
+| Arbitrum | 42161 |
+| Optimism | 10 |
+| Polygon | 137 |
+| Blast | 81457 |
+| Avalanche | 43114 |
+| BSC | 56 |
+| Celo | 42220 |
+| Zora | 7777777 |
+| Worldchain | 480 |
+| Ink | 57073 |
+| Soneium | 1868 |
 
 ---
 

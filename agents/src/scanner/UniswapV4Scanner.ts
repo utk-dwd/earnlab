@@ -9,6 +9,8 @@ import {
   type PublicClient,
 } from "viem";
 import axios from "axios";
+// Uniswap v4 SDK — hook flag decoding, pool key utilities
+import { hookFlagIndex } from "@uniswap/v4-sdk";
 import {
   ALL_CHAINS,
   KNOWN_TOKENS,
@@ -75,7 +77,84 @@ export interface PoolState {
   token1Price:  number;
   /** "onchain" = StateView read succeeded; "defillama" = fallback data */
   dataSource:   "onchain" | "defillama";
+  /** Active v4 hook callbacks decoded from the hooks address lower 14 bits */
+  hookFlags:       string[];
+  /** True when the pool has a non-zero hooks address (custom logic applied) */
+  hasCustomHooks:  boolean;
   lastUpdated:  number;
+}
+
+// ─── Hook flag decoding (Uniswap v4 SDK) ────────────────────────────────────
+/**
+ * Decodes the active hook callbacks for a Uniswap v4 pool by inspecting the
+ * lower 14 bits of the hooks contract address.
+ *
+ * Per the v4 spec the hooks address is mined such that bit N is set iff the
+ * corresponding callback (from hookFlagIndex) is implemented by the contract.
+ * A zero/ETH address means no hooks — the pool is a vanilla concentrated LP.
+ */
+export function decodeHookFlags(hooksAddress: string): string[] {
+  const NULL_HOOK = "0x0000000000000000000000000000000000000000";
+  if (!hooksAddress || hooksAddress === NULL_HOOK) return [];
+
+  const addrNum = BigInt(hooksAddress);
+  const active: string[] = [];
+  for (const [name, bit] of Object.entries(hookFlagIndex)) {
+    if ((addrNum >> BigInt(bit)) & 1n) active.push(name);
+  }
+  return active;
+}
+
+// ─── The Graph — Uniswap v4 subgraph (optional enrichment) ───────────────────
+// Set THEGRAPH_API_KEY in .env to enable. Falls back to DefiLlama-only when absent.
+// Subgraph IDs per chain (The Graph Network decentralised service):
+//   Ethereum mainnet: GqzP4Xaehti8KSfQmv3ZctFSjnSUYZ4En5NRsiTbvZpz
+//   Unichain:         Coming soon (use gateway.thegraph.com when available)
+//
+// Query returns pool-level fee, volume, TVL, txCount for post-scan enrichment.
+
+const THEGRAPH_API_KEY = process.env.THEGRAPH_API_KEY ?? "";
+
+const THEGRAPH_SUBGRAPH: Partial<Record<number, string>> = {
+  1:    "GqzP4Xaehti8KSfQmv3ZctFSjnSUYZ4En5NRsiTbvZpz",  // Ethereum mainnet
+  8453: "HMuAwufqZ1YCRmzL2NcL8A9F5e5JmFNLFRFiSnMjnFqX",  // Base
+};
+
+interface GraphPoolResult {
+  id:           string;
+  feeTier:      string;
+  totalValueLockedUSD: string;
+  volumeUSD:    string;
+  txCount:      string;
+}
+
+let graphCache = new Map<string, { data: GraphPoolResult; ts: number }>();
+
+/**
+ * Fetches volume and TVL from The Graph's Uniswap v4 subgraph for a specific
+ * pool. Returns null when no API key is configured or the subgraph query fails.
+ */
+export async function fetchGraphPoolData(chainId: number, poolId: string): Promise<GraphPoolResult | null> {
+  if (!THEGRAPH_API_KEY) return null;
+  const subgraphId = THEGRAPH_SUBGRAPH[chainId];
+  if (!subgraphId) return null;
+
+  const cacheKey = `${chainId}:${poolId}`;
+  const cached   = graphCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 300_000) return cached.data;
+
+  const url   = `https://gateway.thegraph.com/api/${THEGRAPH_API_KEY}/subgraphs/id/${subgraphId}`;
+  const query = `{ pool(id: "${poolId.toLowerCase()}") { id feeTier totalValueLockedUSD volumeUSD txCount } }`;
+
+  try {
+    const resp = await axios.post(url, { query }, { timeout: 8_000 });
+    const pool: GraphPoolResult | null = resp.data?.data?.pool ?? null;
+    if (pool) {
+      graphCache.set(cacheKey, { data: pool, ts: Date.now() });
+      return pool;
+    }
+  } catch { /* network failure — degrade gracefully */ }
+  return null;
 }
 
 // ─── DefiLlama fetch (cached 5 min) ──────────────────────────────────────────
@@ -195,10 +274,12 @@ async function defiLlamaPoolsForChain(cfg: ChainConfig): Promise<PoolState[]> {
       referenceAPY: p.apy ?? 0,
       token0Symbol: sym0,
       token1Symbol: sym1,
-      token0Price:  0,
-      token1Price:  0,
-      dataSource:   "defillama",
-      lastUpdated:  Date.now(),
+      token0Price:    0,
+      token1Price:    0,
+      dataSource:     "defillama",
+      hookFlags:      decodeHookFlags(poolKey.hooks),
+      hasCustomHooks: poolKey.hooks !== ETH_ADDRESS,
+      lastUpdated:    Date.now(),
     };
   });
 }
@@ -370,7 +451,10 @@ async function onchainScan(cfg: ChainConfig): Promise<PoolState[]> {
           liquidity: liquidity as bigint, tvlUsd, volume24hUsd, liveAPY, referenceAPY: 0,
           token0Symbol: m0.symbol, token1Symbol: m1.symbol,
           token0Price: p0, token1Price: p1,
-          dataSource: "onchain", lastUpdated: Date.now(),
+          dataSource: "onchain",
+          hookFlags:      decodeHookFlags(key.hooks),
+          hasCustomHooks: key.hooks !== ETH_ADDRESS,
+          lastUpdated: Date.now(),
         };
       })
     );

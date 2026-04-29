@@ -124,6 +124,21 @@ export interface StressTestResult {
   scenarios:               StressScenario[];
 }
 
+export type EnrichmentStage =
+  | "enrichRAR"
+  | "capitalEfficiency"
+  | "adverseSelection"
+  | "stressTest"
+  | "scorecard"
+  | "tokenRisk"
+  | "stablecoinRisk";
+
+export interface EnrichmentError {
+  stage:     EnrichmentStage;
+  message:   string;
+  timestamp: number;
+}
+
 export interface RankedOpportunity {
   rank:          number;
   chainId:       number;
@@ -168,6 +183,15 @@ export interface RankedOpportunity {
   adverseSelection:     AdverseSelectionResult | null;
   stressTest:           StressTestResult | null;
   scorecard:            DecisionScorecard | null;
+  /**
+   * Active v4 hook callbacks decoded from the pool hooks address.
+   * Uses @uniswap/v4-sdk hookFlagIndex to identify which of the 14 hook
+   * points are implemented. Empty = vanilla pool, no custom logic.
+   */
+  hookFlags:       string[];
+  hasCustomHooks:  boolean;
+  enrichmentDegraded: boolean;
+  enrichmentErrors:   EnrichmentError[];
   lastUpdated:          number;
 }
 

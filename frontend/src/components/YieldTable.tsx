@@ -267,6 +267,28 @@ Computed from the same hourly DefiLlama
 data used for volatility.
 "—" = no data yet.`;
 
+const HOOKS_TOOLTIP = `Uniswap v4 Hook Flags
+Decoded from the pool's hooks contract address
+using @uniswap/v4-sdk hookFlagIndex.
+
+⚫ = vanilla pool — no custom logic
+🔵 = hooked pool — one or more v4 callbacks active
+
+Active hook callbacks are shown in the tooltip.
+The 14 possible hook points:
+  beforeInitialize / afterInitialize
+  beforeAddLiquidity / afterAddLiquidity
+  beforeRemoveLiquidity / afterRemoveLiquidity
+  beforeSwap / afterSwap
+  beforeDonate / afterDonate
+  beforeSwapReturnsDelta / afterSwapReturnsDelta
+  beforeAddLiquidityReturnsDelta
+  afterRemoveLiquidityReturnsDelta
+
+Hooked pools can implement dynamic fees, MEV
+protection, custom oracles, or concentrated
+liquidity with custom curves.`;
+
 const TOKEN_RISK_TOOLTIP = `Token Risk Score (0–100)
 Powered by GoPlus Security API (free).
 Lower score = safer. TIER1 tokens = 5.
@@ -472,6 +494,12 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                   <InfoIcon />
                 </Tooltip>
               </th>
+              <th className="px-3 py-3">
+                <Tooltip text={HOOKS_TOOLTIP}>
+                  <span className="border-b border-dashed border-gray-400 cursor-help">Hooks</span>
+                  <InfoIcon />
+                </Tooltip>
+              </th>
               <th className="px-3 py-3">Risk</th>
 
               {/* RAR columns with tooltips */}
@@ -505,10 +533,10 @@ export function YieldTable({ opportunities, isLoading }: Props) {
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {isLoading && filtered.length === 0 && (
-              <tr><td colSpan={22} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
+              <tr><td colSpan={23} className="px-4 py-8 text-center text-gray-400">Scanning chains…</td></tr>
             )}
             {!isLoading && filtered.length === 0 && (
-              <tr><td colSpan={22} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
+              <tr><td colSpan={23} className="px-4 py-8 text-center text-gray-400">No pools found</td></tr>
             )}
             {filtered.map((o) => (
               <tr key={`${o.chainId}-${o.poolId}`}
@@ -520,7 +548,12 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                     <span className="font-medium dark:text-gray-200 text-xs">{o.chainName}</span>
                   </div>
                 </td>
-                <td className="px-3 py-2.5 font-mono font-semibold dark:text-gray-100">{o.pair}</td>
+                <td className="px-3 py-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono font-semibold dark:text-gray-100">{o.pair}</span>
+                    <EnrichmentBadge degraded={o.enrichmentDegraded} errors={o.enrichmentErrors ?? []} />
+                  </div>
+                </td>
                 <td className="px-3 py-2.5 text-gray-500 dark:text-gray-400 text-xs">{o.feeTierLabel}</td>
                 <td className="px-3 py-2.5">
                   <span className={`tabular-nums ${apyColor(o.displayAPY)}`}>
@@ -554,6 +587,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                 <td className="px-3 py-2.5"><AdvSelBadge adv={o.adverseSelection} /></td>
                 <td className="px-3 py-2.5"><StressBadge stress={o.stressTest} /></td>
                 <td className="px-3 py-2.5"><ScorecardBadge scorecard={o.scorecard} /></td>
+                <td className="px-3 py-2.5"><HooksBadge hookFlags={o.hookFlags ?? []} hasCustom={o.hasCustomHooks ?? false} /></td>
                 <td className="px-3 py-2.5"><RiskBadge risk={o.risk} /></td>
 
                 {/* RAR 24h */}
@@ -594,6 +628,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
         <span><strong>Adv.Sel</strong> = adverse selection 0–100 &nbsp;·&nbsp; elevated/high = fees earned from informed directional traders, not balanced flow</span>
         <span><strong>Stress</strong> = downside score 0–100 over 8 adversarial 30-day scenarios &nbsp;·&nbsp; 0 = all profitable, 100 = worst case ≥ −20% loss &nbsp;·&nbsp; ES = avg of 3 worst</span>
         <span><strong>Score</strong> = composite decision scorecard 0–100 (weighted: yield 25%, IL 20%, LQ 15%, vol 10%, token 10%, gas 5%, corr 10%, regime 5%) &nbsp;·&nbsp; hover for breakdown</span>
+        <span><strong>Hooks</strong> = Uniswap v4 hook callbacks decoded from hooks address via <code>@uniswap/v4-sdk</code> &nbsp;·&nbsp; ⚫ vanilla &nbsp;·&nbsp; 🔵 N = N active callbacks</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -913,6 +948,41 @@ function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | u
     <Tooltip text={tip}>
       <span className={`font-mono font-semibold tabular-nums text-xs cursor-help ${color}`}>
         {composite.toFixed(0)}
+      </span>
+    </Tooltip>
+  );
+}
+
+function HooksBadge({ hookFlags, hasCustom }: { hookFlags: string[]; hasCustom: boolean }) {
+  if (!hasCustom || hookFlags.length === 0) {
+    return <span className="text-gray-300 dark:text-gray-600 text-xs" title="Vanilla pool — no custom hooks">⚫</span>;
+  }
+  const tip = [
+    `Uniswap v4 Hooked Pool`,
+    `${hookFlags.length} active callback${hookFlags.length > 1 ? "s" : ""}:`,
+    ...hookFlags.map(f => `  • ${f}`),
+    ``,
+    `Decoded via @uniswap/v4-sdk hookFlagIndex`,
+  ].join("\n");
+  return (
+    <Tooltip text={tip}>
+      <span className="text-blue-500 dark:text-blue-400 text-xs cursor-help" title="">
+        🔵 {hookFlags.length}
+      </span>
+    </Tooltip>
+  );
+}
+
+function EnrichmentBadge({ degraded, errors }: {
+  degraded: boolean | undefined;
+  errors: { stage: string; message: string; timestamp: number }[];
+}) {
+  if (!degraded || errors.length === 0) return null;
+  const tip = errors.map(e => `${e.stage}: ${e.message}`).join("\n");
+  return (
+    <Tooltip text={`Enrichment degraded\n${tip}`}>
+      <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+        degraded
       </span>
     </Tooltip>
   );

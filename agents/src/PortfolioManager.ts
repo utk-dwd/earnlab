@@ -1,10 +1,13 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./storage/ZeroGMemory";
+import { SnapshotStore } from "./storage/SnapshotStore";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
 import { TICK_SPACINGS, gasBreakEvenDays, GAS_COST_USD } from "./config/chains";
 import type { FeeTier } from "./config/chains";
+// Uniswap v4 SDK utilities for position tick range computation
+import { nearestUsableTick, TickMath } from "@uniswap/v3-sdk";
 import { rankFactor } from "./calculator/LiquidityQualityCalculator";
 import {
   RISK_BUDGET,
@@ -136,10 +139,23 @@ export interface PortfolioSummary {
 
 export type { AgentDecision, DecisionCycle };
 
+interface PortfolioSnapshot {
+  cash:            number;
+  positions:       MockPosition[];
+  trades:          PortfolioTrade[];
+  feesPaid:        number;
+  lastRebalance:   number | null;
+  lastCycle:       DecisionCycle | null;
+  decisionHistory: DecisionCycle[];
+  regime:          MacroRegime;
+  savedAt:         number;
+}
+
 // ─── PortfolioManager ─────────────────────────────────────────────────────────
 
 export class PortfolioManager {
   private reporter:      ReporterAgent;
+  private snapshots      = new SnapshotStore();
   private cash:          number = INITIAL_CAPITAL_USD;
   private positions:     Map<string, MockPosition> = new Map();
   private trades:        PortfolioTrade[] = [];
@@ -158,6 +174,7 @@ export class PortfolioManager {
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
     this.memory   = new ZeroGMemory();
+    this.restoreState();
   }
 
   async start(): Promise<void> {
@@ -183,7 +200,11 @@ export class PortfolioManager {
     }, CHECK_INTERVAL_MS);
   }
 
-  stop(): void { this.running = false; }
+  stop(): void {
+    this.running = false;
+    this.persistState();
+    this.snapshots.close();
+  }
 
   // ─── Main tick ───────────────────────────────────────────────────────────
   private async tick(): Promise<void> {
@@ -219,6 +240,7 @@ export class PortfolioManager {
         this.rebalance();
       }
     }
+    this.persistState();
   }
 
   // ─── LLM-driven decision ─────────────────────────────────────────────────
@@ -251,6 +273,7 @@ export class PortfolioManager {
       }
 
       this.lastRebalance = Date.now();
+      this.persistState();
     } catch (err: any) {
       console.warn(`[Portfolio] LLM failed (${err.message}), falling back to rule-based`);
       if (trigger === "deploy") this.deploy();
@@ -383,6 +406,7 @@ export class PortfolioManager {
 
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason, agentDecision);
     this.lastRebalance = Date.now();
+    this.persistState();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
     return true;
   }
@@ -399,6 +423,7 @@ export class PortfolioManager {
       return false;
     }
     const proceeds = this.exit(pos, reason);
+    this.persistState();
     console.log(`[Portfolio] closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
     return true;
   }
@@ -564,6 +589,7 @@ export class PortfolioManager {
       console.log(`[Portfolio] Deployed ${selected[i].pair} Kelly=${(rawFracs[i]*100).toFixed(1)}% → allocated ${(pct*100).toFixed(1)}% ($${usd.toFixed(0)})`);
     }
     this.lastRebalance = Date.now();
+    this.persistState();
   }
 
   // ─── Rule-based fallback: rebalancing ────────────────────────────────────
@@ -602,6 +628,7 @@ export class PortfolioManager {
       const proceeds = this.exit(pos, reason);
       this.enter(best, proceeds, pos.allocationPct, `Rebalanced from ${pos.pair}`);
       this.lastRebalance = Date.now();
+      this.persistState();
 
       inPortfolio.delete(pos.poolId);
       inPortfolio.add(best.poolId);
@@ -675,6 +702,7 @@ export class PortfolioManager {
       console.log(`[Portfolio] Exit trigger — ${pos.pair}@${pos.chainName}: ${reason}`);
       this.exit(pos, reason);
       this.lastRebalance = Date.now();
+      this.persistState();
     }
   }
 
@@ -758,6 +786,7 @@ export class PortfolioManager {
       feeTierLabel: opp.feeTierLabel, valueUsd: invested,
       apy: opp.displayAPY, rar7d: opp.rar7d, feePaidUsd: fee, reason,
     });
+    this.persistState();
   }
 
   private exit(pos: MockPosition, reason: string): number {
@@ -788,6 +817,7 @@ export class PortfolioManager {
       feeTierLabel: pos.feeTierLabel, valueUsd: proceeds,
       apy: pos.entryAPY, rar7d: pos.entryRAR7d, feePaidUsd: fee, reason,
     });
+    this.persistState();
     return proceeds;
   }
 
@@ -893,12 +923,57 @@ export class PortfolioManager {
   getDecisionHistory(limit = 20): DecisionCycle[] {
     return this.decisionHistory.slice(0, limit);
   }
+
+  private restoreState(): void {
+    try {
+      const snapshot = this.snapshots.load<PortfolioSnapshot>("portfolio.state");
+      if (!snapshot) return;
+
+      this.cash            = snapshot.cash ?? INITIAL_CAPITAL_USD;
+      this.positions       = new Map((snapshot.positions ?? []).map(p => [p.poolId, p]));
+      this.trades          = snapshot.trades ?? [];
+      this.feesPaid        = snapshot.feesPaid ?? 0;
+      this.lastRebalance   = snapshot.lastRebalance ?? null;
+      this.lastCycle       = snapshot.lastCycle ?? null;
+      this.decisionHistory = snapshot.decisionHistory ?? [];
+      this.regime          = snapshot.regime ?? "neutral";
+      this.updateValues();
+
+      console.log(
+        `[Portfolio] Restored state from SQLite snapshot: ` +
+        `$${this.cash.toFixed(2)} cash, ${this.openList().length} open position(s), ${this.trades.length} trade(s)`,
+      );
+    } catch (err) {
+      console.warn(`[Portfolio] Failed to restore snapshot: ${portfolioErrorMessage(err)}`);
+    }
+  }
+
+  private persistState(): void {
+    try {
+      this.snapshots.save<PortfolioSnapshot>("portfolio.state", {
+        cash:            this.cash,
+        positions:       [...this.positions.values()],
+        trades:          this.trades,
+        feesPaid:        this.feesPaid,
+        lastRebalance:   this.lastRebalance,
+        lastCycle:       this.lastCycle,
+        decisionHistory: this.decisionHistory,
+        regime:          this.regime,
+        savedAt:         Date.now(),
+      });
+    } catch (err) {
+      console.warn(`[Portfolio] Failed to persist snapshot: ${portfolioErrorMessage(err)}`);
+    }
+  }
 }
 
 // ─── Tick range calculator ────────────────────────────────────────────────────
 // Uniswap v4: price = 1.0001^tick  →  tickDelta = ln(1 + pct/100) / ln(1.0001)
 // Range = ±2σ (vol7d × 2%) — covers ~95% of 7-day price movement.
-// Snapped outward to the pool's tick spacing so the range is always valid.
+// Tick math uses the same log-base-1.0001 formula as Uniswap v4.
+// nearestUsableTick (Uniswap v3/v4 SDK) snaps to the nearest valid spacing
+// multiple; we pass the ceiling so the range is always at least as wide as 2σ.
+// Results are clamped to TickMath.MIN_TICK / MAX_TICK (±887272).
 
 const LN_1_0001 = Math.log(1.0001); // ≈ 9.9995e-5
 
@@ -907,11 +982,16 @@ function computeTickRange(opp: RankedOpportunity): {
   tickUpper:    number;
   halfRangePct: number;
 } {
-  const vol          = opp.vol7d > 0 ? opp.vol7d : 5;     // default 5% if vol unknown
-  const halfRangePct = vol * 2;                             // 2σ in %
+  const vol          = opp.vol7d > 0 ? opp.vol7d : 5;
+  const halfRangePct = vol * 2;
   const rawHalfTicks = Math.log(1 + halfRangePct / 100) / LN_1_0001;
   const spacing      = TICK_SPACINGS[opp.feeTier as FeeTier] ?? 60;
-  const halfTicks    = Math.ceil(rawHalfTicks / spacing) * spacing;  // snap outward
+  // Snap to nearest valid tick multiple (outward: ceil before passing to SDK)
+  const rawCeiled    = Math.ceil(rawHalfTicks / spacing) * spacing;
+  const halfTicks    = Math.min(
+    nearestUsableTick(rawCeiled, spacing),
+    TickMath.MAX_TICK,
+  );
   return { tickLower: -halfTicks, tickUpper: halfTicks, halfRangePct };
 }
 
@@ -988,4 +1068,14 @@ function rarOrApySort(a: RankedOpportunity, b: RankedOpportunity): number {
   const effA = (a.effectiveNetAPY ?? 0) > 0 ? a.effectiveNetAPY : a.netAPY;
   const effB = (b.effectiveNetAPY ?? 0) > 0 ? b.effectiveNetAPY : b.netAPY;
   return effB * fb - effA * fa;
+}
+
+function portfolioErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }
