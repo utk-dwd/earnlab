@@ -1,6 +1,13 @@
 import { KeeperhubError } from "../types";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+function sanitizeErrorDetail(text: string): string {
+  const stripped = text.replace(/[^	
+  if (stripped.length <= MAX_ERROR_DETAIL_CHARS) return stripped;
+  return `${stripped.slice(0, MAX_ERROR_DETAIL_CHARS - 3)}...`;
+}
 
 export async function getJson<T>(
   url: string,
@@ -32,7 +39,10 @@ export async function getJson<T>(
     try {
       return JSON.parse(text) as T;
     } catch (err: any) {
-      const errorMessage = err?.message ? `${err.message}: ${text}` : text;
+      const sanitizedText = sanitizeErrorDetail(text);
+      const errorMessage = err?.message
+        ? `${err.message}: ${sanitizedText}`
+        : sanitizedText;
       throw new KeeperhubError("Invalid JSON response", 502, errorMessage);
     }
   } catch (err: any) {
