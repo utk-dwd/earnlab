@@ -53,10 +53,12 @@ export interface KeeperhubTemplate {
 export class KeeperhubError extends Error {
   public status: number;
   public details?: string;
+  public cause?: unknown;
 
-  constructor(message: string, status = 500, details?: string) {
+  constructor(message: string, status = 500, details?: string, cause?: unknown) {
     super(message);
     this.status = status;
     this.details = details;
+    this.cause = cause;
   }
 }
