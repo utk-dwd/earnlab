@@ -2,163 +2,33 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: "../.env" });
 
 import pLimit from "p-limit";
+import type { EnrichmentStage, RankedOpportunity } from "./api/types";
 import { UniswapV4Scanner, type PoolState } from "./scanner/UniswapV4Scanner";
 import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
 import { SlippageGuard } from "./calculator/SlippageGuard";
 import { computePairRAR, type RARResult } from "./calculator/VolatilityCalculator";
 import { computeLiquidityQuality, lqRankFactor, rankFactor } from "./calculator/LiquidityQualityCalculator";
-import { TokenRiskAssessor, type PoolRiskResult } from "./calculator/TokenRiskAssessor";
-import { StablecoinRiskAssessor, type StablecoinRiskResult } from "./calculator/StablecoinRiskAssessor";
+import { TokenRiskAssessor } from "./calculator/TokenRiskAssessor";
+import { StablecoinRiskAssessor } from "./calculator/StablecoinRiskAssessor";
 import { computeCapitalEfficiency } from "./calculator/CapitalEfficiencyCalculator";
-import { detectAdverseSelection, type AdverseSelectionResult } from "./calculator/AdverseSelectionDetector";
-import { runStressTest, type StressTestResult } from "./calculator/ScenarioStressTester";
-import { computeScorecard, type DecisionScorecard } from "./calculator/DecisionScorecard";
+import { detectAdverseSelection } from "./calculator/AdverseSelectionDetector";
+import { runStressTest } from "./calculator/ScenarioStressTester";
+import { computeScorecard } from "./calculator/DecisionScorecard";
 import { APYHistoryStore } from "./storage/APYHistoryStore";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
 import { SnapshotStore } from "./storage/SnapshotStore";
 import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
+
+export type { RankedOpportunity } from "./api/types";
 
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
 const TOP_N            = Number(process.env.TOP_N            ?? 20);
 const ENRICH_CONCURRENCY = Number(process.env.ENRICH_CONCURRENCY ?? 5);
 const NETWORK_FILTER   = (process.env.NETWORK_FILTER ?? "all") as "mainnet" | "testnet" | "all";
 
-export type EnrichmentStage =
-  | "enrichRAR"
-  | "capitalEfficiency"
-  | "adverseSelection"
-  | "stressTest"
-  | "scorecard"
-  | "tokenRisk"
-  | "stablecoinRisk";
-
-export interface EnrichmentError {
-  stage:     EnrichmentStage;
-  message:   string;
-  timestamp: number;
-}
-
 interface RankedSnapshot {
   latest: RankedOpportunity[];
   savedAt: number;
-}
-
-// ─── Ranked yield opportunity ─────────────────────────────────────────────────
-export interface RankedOpportunity {
-  rank:          number;
-  chainId:       number;
-  chainName:     string;
-  network:       "mainnet" | "testnet";
-  poolId:        string;
-  pair:          string;
-  feeTier:       number;
-  feeTierLabel:  string;
-  liveAPY:       number;
-  referenceAPY:  number;
-  displayAPY:    number;
-  apySource:     "live" | "reference";
-  risk:          ReturnType<typeof apyRisk>;
-  tvlUsd:        number;
-  volume24hUsd:  number;
-  token0Price:   number;
-  token1Price:   number;
-  // ── Risk-Adjusted Return ──────────────────────────────────────────────────
-  /** RAR = displayAPY / annualised vol (24h hourly log-returns). 0 = not yet computed. */
-  rar24h:        number;
-  /** RAR = displayAPY / annualised vol (7d hourly log-returns). */
-  rar7d:         number;
-  /** Annualised volatility % used for rar24h */
-  vol24h:        number;
-  /** Annualised volatility % used for rar7d */
-  vol7d:         number;
-  rarQuality:    RARResult["quality"];
-  token0PriceChange24h: number;
-  token0PriceChange7d:  number;
-  token1PriceChange24h: number;
-  token1PriceChange7d:  number;
-  pairPriceChange24h:   number;
-  pairPriceChange7d:    number;
-  // ── Net APY (fee APY minus expected impermanent loss) ─────────────────────
-  /** Annualised expected IL % = 0.5 × (vol7d/100)² × 100. 0 = vol not yet computed. */
-  expectedIL:    number;
-  /** Net APY = displayAPY − expectedIL. Can be negative for volatile pairs. */
-  netAPY:        number;
-  /**
-   * Composite liquidity-quality score 0–100.
-   * Geometric mean of: TVL adequacy, vol/TVL activity, APY stability, depth vs vol.
-   * Used as a √(lq/100) multiplier on RAR for final ranking.
-   */
-  liquidityQuality: number;
-  /**
-   * 7-day median fee APY (0 = fewer than 6 hourly samples recorded yet).
-   * Populated from APYHistoryStore; becomes accurate after ≥6h of agent uptime.
-   */
-  medianAPY7d: number;
-  /**
-   * APY persistence = min(medianAPY7d / currentAPY, 1.0).
-   * 1.0 = APY is at or below the 7-day median (sustained or improving).
-   * < 1.0 = current APY is above median — potential volume spike.
-   * Defaults to 1.0 until 6h of history are collected.
-   */
-  apyPersistence: number;
-  /**
-   * GoPlus / heuristic token safety assessment.
-   * null = not yet checked (enriched async after RAR).
-   * blockEntry=true means the agent will NOT enter this pool.
-   */
-  tokenRisk:        PoolRiskResult | null;
-  /**
-   * Six-dimension stablecoin risk (peg, imbalance, issuer, bridge, chain, depeg vol).
-   * null = no stablecoins in this pool, or assessment not yet complete.
-   * blockEntry=true means a stablecoin is depegged > 5%.
-   */
-  stablecoinRisk:   StablecoinRiskResult | null;
-  // ── Capital efficiency (concentrated LP) ─────────────────────────────────
-  /** Fraction of 7d hourly prices within ±2σ_7d of current price (0–1). */
-  timeInRangePct:       number;
-  /** sqrt(min(liveAPY, refAPY) / max(liveAPY, refAPY)) — fee consistency (0–1). */
-  feeCaptureEfficiency: number;
-  /** timeInRangePct × feeCaptureEfficiency (0–1). */
-  capitalUtilization:   number;
-  /** netAPY × capitalUtilization — expected yield on deployed capital. */
-  effectiveNetAPY:      number;
-  /** ±% range used to compute TiR (= 2σ of 7-day price distribution). */
-  halfRangePct:         number;
-  // ── Adverse selection ─────────────────────────────────────────────────────
-  /**
-   * Detects toxic LP flow: fees paid by informed directional traders.
-   * Four sub-signals: feeVsPriceMove, volumeDuringLargeMoves,
-   * postTradePriceDrift, volatilityAfterVolumeSpikes.
-   * null = not yet computed (async after enrichRAR).
-   */
-  adverseSelection:     AdverseSelectionResult | null;
-  /**
-   * Eight pre-entry stress scenarios: token −5/10/20%, vol×2, volume−50%,
-   * APY mean-reverts, gas×5, stable depeg 50bps.
-   * Ranked worst-first; downsideScore 0–100 for column sorting.
-   * null = not yet computed (sync, runs after enrichRAR).
-   */
-  stressTest:           StressTestResult | null;
-  /**
-   * 8-dimension decision scorecard (yield, IL, liquidity, volatility,
-   * tokenRisk, gas, correlation, regime) plus composite and allocationPct.
-   * Standalone version: correlation=50, regime=75 until PortfolioManager
-   * enriches with actual portfolio state via enrichWithPortfolio().
-   */
-  scorecard:            DecisionScorecard | null;
-  /**
-   * Active Uniswap v4 hook callbacks decoded from the pool's hooks address
-   * (lower 14 bits). Empty array = vanilla pool with no custom logic.
-   * Populated by decodeHookFlags() using @uniswap/v4-sdk hookFlagIndex.
-   */
-  hookFlags:       string[];
-  /** True when the pool has a non-zero hooks contract (custom logic active). */
-  hasCustomHooks:  boolean;
-  /** True when one or more enrichment stages failed for this scan. */
-  enrichmentDegraded: boolean;
-  /** Per-stage enrichment failures surfaced to API/UI consumers. */
-  enrichmentErrors:   EnrichmentError[];
-  lastUpdated:   number;
 }
 
 export class ReporterAgent {

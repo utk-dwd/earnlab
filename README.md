@@ -357,6 +357,10 @@ Interactive Swagger UI at **http://localhost:3000/docs**.
 | POST | `/slippage/check` | Simulate a swap and return slippage estimate |
 | GET | `/health` | Liveness check |
 
+### Shared API contract
+
+The frontend re-exports opportunity and enrichment contract types from `agents/src/api/types.ts` instead of redefining `RankedOpportunity` locally. Backend code imports the same `RankedOpportunity` type, so scorecard, enrichment, risk, optimizer, and hook fields fail type-checking in one place instead of drifting silently between `ReporterAgent` and `frontend/src/types/api.ts`.
+
 ---
 
 ## Project structure
@@ -393,7 +397,8 @@ earnYld/
 │       │   ├── ExecutionHistory.ts           # SQLite execution log
 │       │   └── SnapshotStore.ts              # SQLite ranked + portfolio snapshots
 │       ├── api/
-│       │   └── server.ts                     # Express REST + SSE endpoints
+│       │   ├── server.ts                     # Express REST + SSE endpoints
+│       │   └── types.ts                      # Shared API contract types
 │       └── config/
 │           └── chains.ts                     # Chain configs, tick spacings,
 │                                             #   gas estimates, known tokens
