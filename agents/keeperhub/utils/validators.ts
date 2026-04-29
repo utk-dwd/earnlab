@@ -8,7 +8,10 @@ export function requireBaseUrl(baseUrl: string): string {
       throw new KeeperhubError("earnlabBaseUrl must be http(s)", 400);
     }
     return parsed.toString().replace(/\/$/, "");
-  } catch {
+  } catch (error) {
+    if (error instanceof KeeperhubError) {
+      throw error;
+    }
     throw new KeeperhubError("earnlabBaseUrl is invalid", 400);
   }
 }
