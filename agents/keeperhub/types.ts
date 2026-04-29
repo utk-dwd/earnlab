@@ -10,7 +10,7 @@ export interface EarnlabYieldsQuery {
 export interface EarnlabYield {
   poolId: string;
   chainId: number;
-  network: string;
+  network: EarnlabNetwork;
   pair: string;
   displayAPY: number;
   riskScore?: number;
@@ -30,14 +30,7 @@ export interface EarnlabPortfolioSummary {
   regime?: string;
 }
 
-export interface EarnlabPortfolioResponse {
-  cash: number;
-  invested: number;
-  positions: number;
-  unrealizedPnL?: number;
-  fees?: number;
-  regime?: string;
-}
+export interface EarnlabPortfolioResponse extends EarnlabPortfolioSummary {}
 
 export interface TemplateInputs {
   earnlabBaseUrl: string;
