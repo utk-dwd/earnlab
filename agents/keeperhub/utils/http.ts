@@ -4,7 +4,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_ERROR_DETAIL_CHARS = 500;
 
 function sanitizeErrorDetail(text: string): string {
-  const stripped = text.replace(/[^	
+  const stripped = text.replace(/[\n\r\t]/g, " ");
   if (stripped.length <= MAX_ERROR_DETAIL_CHARS) return stripped;
   return `${stripped.slice(0, MAX_ERROR_DETAIL_CHARS - 3)}...`;
 }
@@ -25,7 +25,7 @@ export async function getJson<T>(
       const onAbort = () => controller.abort();
       init.signal.addEventListener("abort", onAbort);
       cleanupSignalListener = () =>
-        init.signal.removeEventListener("abort", onAbort);
+        init.signal!.removeEventListener("abort", onAbort);
     }
   }
 
