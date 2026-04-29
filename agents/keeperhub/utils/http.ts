@@ -32,11 +32,8 @@ export async function getJson<T>(
     try {
       return JSON.parse(text) as T;
     } catch (err: any) {
-      throw new KeeperhubError(
-        "Invalid JSON response",
-        502,
-        err?.message ?? text
-      );
+      const errorMessage = err?.message ? `${err.message}: ${text}` : text;
+      throw new KeeperhubError("Invalid JSON response", 502, errorMessage);
     }
   } catch (err: any) {
     if (err?.name === "AbortError") {
