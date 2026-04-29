@@ -156,17 +156,22 @@ Token equivalents: WETH/cbETH/wstETH/rETH/ezETH/weETH → ETH; WBTC → BTC.
 Stablecoin issuers: Circle (USDC/USDbC), Tether (USDT), Sky (DAI/USDS), Frax, Liquity (LUSD/BOLD), Aave (GHO), Curve (crvUSD), PayPal (PYUSD), and others.
 
 ### Portfolio optimisation (marginal Sharpe)
-Each tick, a greedy optimiser selects the best allocation across open candidates:
+Each tick, a greedy optimiser selects the best allocation across open candidates. It uses real pool-level APY correlation when enough hourly history exists, and falls back to token/chain overlap heuristics only when the correlation estimate is unavailable.
 
 ```
 marginalReturn = alloc × effectiveNetAPY
 marginalRisk   = alloc × (1 − composite/100) × correlationMultiplier
 marginalSharpe = marginalReturn / marginalRisk
 
-correlationMultiplier = 1 + tokenOverlap×0.5 + chainDuplicate×0.3
+avgCorr = avg Pearson ρ(candidate APY series, selected pool APY series)
+correlationMultiplier = clamp(1 + avgCorr × 0.8, 0.2, 1.8)
+
+fallback avgCorr = tokenOverlap×0.5 + chainDuplicate×0.3
 ```
 
-The optimiser runs `enrichWithPortfolio()` on each candidate before selection to update portfolio-aware correlation and regime scores. It builds a provisional position set as each allocation is chosen, so later picks account for earlier ones. Output includes `portfolioReturn`, `portfolioRisk`, `portfolioSharpe`, and per-pool `marginalSharpe`.
+The correlation matrix is built from `APYHistoryStore` hourly snapshots using an inner join on shared `hour_key` values. Pool pairs need at least 6 overlapping hourly samples; otherwise the optimiser uses the structural fallback above. This catches correlated pools such as two ETH/stablecoin opportunities on different chains that may have no token/chain overlap penalty but move together in APY during market stress.
+
+The optimiser runs `enrichWithPortfolio()` on each candidate before selection to update portfolio-aware correlation and regime scores. It builds a provisional position set as each allocation is chosen, so later picks account for earlier ones. Output includes `portfolioReturn`, `portfolioRisk`, `portfolioSharpe`, per-pool `marginalSharpe`, and `correlationWithPortfolio`.
 
 ### Portfolio manager
 Runs every 5 minutes against $10,000 simulated capital.
@@ -188,6 +193,8 @@ halfTicks = ceil( ln(1 + vol7d×2/100) / ln(1.0001) / spacing ) × spacing
 - A competing pool is > 50% better RAR7d
 - Pair price moved > ±15% in 7d (IL acceleration)
 - Time-in-Range falls below 80%
+- Predictive RAR momentum: RAR falls for 3 consecutive ticks with a ≥10% total drop
+- Predictive negative momentum: 24h pair price change is negative and worsening by ≥2 percentage points per tick
 - Position stale > 30 days with net APY < 5%
 
 ### Macro regime detection
@@ -412,6 +419,7 @@ earnYld/
 |---|---|---|
 | `SCAN_INTERVAL_MS` | `60000` | Chain re-scan interval |
 | `TOP_N` | `20` | Pools kept in ranked list |
+| `ENRICH_CONCURRENCY` | `5` | Max pools enriched concurrently |
 | `AGENT_API_PORT` | `3001` | REST API port |
 | `NETWORK_FILTER` | `all` | `all` / `mainnet` / `testnet` |
 | `OPENROUTER_API_KEY` | — | Enables LLM decisions; falls back to rules if absent |

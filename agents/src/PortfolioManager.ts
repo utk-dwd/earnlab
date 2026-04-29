@@ -61,6 +61,9 @@ const PRICE_MOVE_THRESHOLD_PCT = 15;    // exit if |pairPriceChange7d| > 15%
 const TIME_IN_RANGE_MIN_PCT    = 80;    // exit if estimated time-in-range < 80%
 const STALE_DAYS               = 30;    // position is "stale" after this many days
 const STALE_NET_APY_MIN        = 5;     // stale position must have at least this net APY
+const RAR_TREND_TICKS          = 3;     // predictive exit: RAR falling for N consecutive ticks
+const RAR_TREND_MIN_DROP_PCT   = 10;    // ignore tiny RAR drift
+const NEG_MOMENTUM_STEP_PCT    = 2;     // predictive exit: 24h move worsening by at least this much per tick
 
 let _seq = 0;
 const nextId = () => `${Date.now()}-${++_seq}`;
@@ -98,6 +101,10 @@ export interface MockPosition {
   timeInRangePct:  number;
   /** Active exit trigger descriptions. Updated every tick; empty = healthy. */
   exitAlerts:      string[];
+  /** Recent RAR samples for predictive deterioration alerts. */
+  rarTrend:        number[];
+  /** Recent pairPriceChange24h samples, in percent, for momentum acceleration alerts. */
+  pairMove24hTrend: number[];
 }
 
 export interface PortfolioTrade {
@@ -654,6 +661,7 @@ export class PortfolioManager {
       const currentRAR  = opp?.rar7d  ?? 0;
       const currentNet  = opp?.netAPY ?? pos.entryAPY;
       const pairMovePct = Math.abs((opp?.pairPriceChange7d ?? 0) * 100);
+      this.recordPredictiveSignals(pos, opp);
 
       // TiR based on actual 2σ tick range stored at entry.
       // rangeFraction: 0 = at center, 1 = at range boundary, 2 = 2× out of range.
@@ -688,7 +696,15 @@ export class PortfolioManager {
         alerts.push(`Out of range: ~${pos.timeInRangePct.toFixed(0)}% time-in-range (< ${TIME_IN_RANGE_MIN_PCT}%)`);
       }
 
-      // 5. Stale and low-yield
+      // 5. Predictive RAR momentum: falling for 3 consecutive ticks
+      const rarTrendAlert = predictiveRarAlert(pos);
+      if (rarTrendAlert) alerts.push(rarTrendAlert);
+
+      // 6. Predictive negative price momentum: 24h drawdown accelerating
+      const negMomentumAlert = predictiveNegativeMomentumAlert(pos);
+      if (negMomentumAlert) alerts.push(negMomentumAlert);
+
+      // 7. Stale and low-yield
       if (heldH > STALE_DAYS * 24 && currentNet < STALE_NET_APY_MIN) {
         alerts.push(`Stale: ${(heldH / 24).toFixed(0)}d held, netAPY ${currentNet.toFixed(1)}% < ${STALE_NET_APY_MIN}%`);
       }
@@ -703,6 +719,18 @@ export class PortfolioManager {
       this.exit(pos, reason);
       this.lastRebalance = Date.now();
       this.persistState();
+    }
+  }
+
+  private recordPredictiveSignals(pos: MockPosition, opp: RankedOpportunity | undefined): void {
+    pos.rarTrend = Array.isArray(pos.rarTrend) ? pos.rarTrend : [];
+    pos.pairMove24hTrend = Array.isArray(pos.pairMove24hTrend) ? pos.pairMove24hTrend : [];
+
+    if (opp?.rar7d && opp.rar7d > 0 && Number.isFinite(opp.rar7d)) {
+      pushBounded(pos.rarTrend, +opp.rar7d.toFixed(6), RAR_TREND_TICKS);
+    }
+    if (opp && Number.isFinite(opp.pairPriceChange24h)) {
+      pushBounded(pos.pairMove24hTrend, +(opp.pairPriceChange24h * 100).toFixed(4), RAR_TREND_TICKS);
     }
   }
 
@@ -778,6 +806,8 @@ export class PortfolioManager {
       halfRangePct,
       timeInRangePct:  100,
       exitAlerts:      [],
+      rarTrend:        [],
+      pairMove24hTrend: [],
     };
     this.positions.set(opp.poolId, pos);
     this.trades.push({
@@ -1007,6 +1037,31 @@ function tokenExposureMap(positions: MockPosition[]): Map<string, number> {
     }
   }
   return map;
+}
+
+function pushBounded(series: number[], value: number, maxLength: number): void {
+  series.push(value);
+  while (series.length > maxLength) series.shift();
+}
+
+function predictiveRarAlert(pos: MockPosition): string | null {
+  const trend = pos.rarTrend ?? [];
+  if (trend.length < RAR_TREND_TICKS) return null;
+  const [first, second, third] = trend;
+  if (!(first > second && second > third)) return null;
+  const dropPct = first > 0 ? (1 - third / first) * 100 : 0;
+  if (dropPct < RAR_TREND_MIN_DROP_PCT) return null;
+  return `Predictive RAR momentum: ${first.toFixed(2)} → ${second.toFixed(2)} → ${third.toFixed(2)} (${dropPct.toFixed(0)}% drop over ${RAR_TREND_TICKS} ticks)`;
+}
+
+function predictiveNegativeMomentumAlert(pos: MockPosition): string | null {
+  const trend = pos.pairMove24hTrend ?? [];
+  if (trend.length < RAR_TREND_TICKS) return null;
+  const [first, second, third] = trend;
+  const acceleratingLower = second <= first - NEG_MOMENTUM_STEP_PCT
+    && third <= second - NEG_MOMENTUM_STEP_PCT;
+  if (!(first < 0 && second < 0 && third < 0 && acceleratingLower)) return null;
+  return `Predictive negative momentum: 24h move ${first.toFixed(1)}% → ${second.toFixed(1)}% → ${third.toFixed(1)}%`;
 }
 
 // ─── Switch benefit check ────────────────────────────────────────────────────

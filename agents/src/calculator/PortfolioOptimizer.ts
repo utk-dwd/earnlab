@@ -290,6 +290,8 @@ function syntheticPosition(opp: RankedOpportunity, valueUsd: number): MockPositi
     halfRangePct:    opp.vol7d * 2,
     timeInRangePct:  opp.timeInRangePct * 100,
     exitAlerts:      [],
+    rarTrend:        [],
+    pairMove24hTrend: [],
   };
 }
 

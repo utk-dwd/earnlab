@@ -273,6 +273,8 @@ export interface MockPosition {
   halfRangePct:    number;
   timeInRangePct:  number;
   exitAlerts:      string[];
+  rarTrend:        number[];
+  pairMove24hTrend: number[];
 }
 
 export interface PortfolioTrade {

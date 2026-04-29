@@ -1,6 +1,7 @@
 import * as dotenv from "dotenv";
 dotenv.config({ path: "../.env" });
 
+import pLimit from "p-limit";
 import { UniswapV4Scanner, type PoolState } from "./scanner/UniswapV4Scanner";
 import { calcPoolFeeAPY, formatAPY, apyRisk } from "./calculator/APYCalculator";
 import { SlippageGuard } from "./calculator/SlippageGuard";
@@ -19,6 +20,7 @@ import { ETH_ADDRESS, KNOWN_TOKENS } from "./config/chains";
 
 const SCAN_INTERVAL_MS = Number(process.env.SCAN_INTERVAL_MS ?? 60_000);
 const TOP_N            = Number(process.env.TOP_N            ?? 20);
+const ENRICH_CONCURRENCY = Number(process.env.ENRICH_CONCURRENCY ?? 5);
 const NETWORK_FILTER   = (process.env.NETWORK_FILTER ?? "all") as "mainnet" | "testnet" | "all";
 
 export type EnrichmentStage =
@@ -317,8 +319,9 @@ export class ReporterAgent {
 
   // ─── Enrich ranked list with RAR (network calls per unique token) ─────────
   private async enrichRAR(ranked: RankedOpportunity[]): Promise<void> {
+    const limit = pLimit(ENRICH_CONCURRENCY);
     await Promise.allSettled(
-      ranked.map(async (opp) => {
+      ranked.map((opp) => limit(async () => {
         const r = opp as any; // access stashed fields
         if (!r._token0Address) return;
 
@@ -429,7 +432,7 @@ export class ReporterAgent {
         } catch (err) {
           markEnrichmentFailed("scorecard", opp, err);
         }
-      })
+      }))
     );
     // Re-sort: LQ × persistence × capitalUtilization × (1 − advPenalty) × (1 − stressPenalty)
     // advPenalty:    score > 50 discounts up to 30% at score=100
@@ -466,10 +469,11 @@ export class ReporterAgent {
   }
 
   // ─── Token risk enrichment ───────────────────────────────────────────────
-  // Runs after enrichRAR (sequential, not concurrent) so token0/1 prices are current.
+  // Runs after enrichRAR so token0/1 prices are current. Per-pool calls are bounded by ENRICH_CONCURRENCY.
   private async enrichTokenRisk(ranked: RankedOpportunity[]): Promise<void> {
+    const limit = pLimit(ENRICH_CONCURRENCY);
     await Promise.allSettled(
-      ranked.map(async (opp) => {
+      ranked.map((opp) => limit(async () => {
         const r = opp as any;
         if (!r._token0Address) return;
         try {
@@ -490,7 +494,7 @@ export class ReporterAgent {
         } catch (err) {
           markEnrichmentFailed("tokenRisk", opp, err);
         }
-      })
+      }))
     );
     // Prune expired cache entries once per scan cycle
     this.tokenRisk.clearExpired();
@@ -499,8 +503,9 @@ export class ReporterAgent {
   // ─── Stablecoin risk enrichment ──────────────────────────────────────────
   // Runs in parallel with enrichTokenRisk (both are independent post-RAR steps).
   private async enrichStablecoinRisk(ranked: RankedOpportunity[]): Promise<void> {
+    const limit = pLimit(ENRICH_CONCURRENCY);
     await Promise.allSettled(
-      ranked.map(async (opp) => {
+      ranked.map((opp) => limit(async () => {
         const r = opp as any;
         if (!r._token0Address) return;
         try {
@@ -520,7 +525,7 @@ export class ReporterAgent {
         } catch (err) {
           markEnrichmentFailed("stablecoinRisk", opp, err);
         }
-      })
+      }))
     );
   }
 
