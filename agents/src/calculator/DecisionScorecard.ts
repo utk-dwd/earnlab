@@ -39,14 +39,14 @@ import type { MacroRegime }    from "../PortfolioManager";
 //           IL tolerance increases because fee APY is rising too.
 
 export type WeightSet = Record<
-  "yield" | "il" | "liquidity" | "volatility" | "tokenRisk" | "gas" | "correlation" | "regime",
+  "yield" | "il" | "liquidity" | "volatility" | "tokenRisk" | "gas" | "correlation" | "regime" | "hookRisk",
   number
 >;
 
 export const WEIGHTS_BY_REGIME = {
-  "risk-off": { yield: 0.10, il: 0.30, liquidity: 0.15, volatility: 0.15, tokenRisk: 0.15, gas: 0.05, correlation: 0.07, regime: 0.03 },
-  "neutral":  { yield: 0.25, il: 0.20, liquidity: 0.15, volatility: 0.10, tokenRisk: 0.10, gas: 0.05, correlation: 0.10, regime: 0.05 },
-  "risk-on":  { yield: 0.35, il: 0.10, liquidity: 0.15, volatility: 0.08, tokenRisk: 0.08, gas: 0.04, correlation: 0.12, regime: 0.08 },
+  "risk-off": { yield: 0.09, il: 0.28, liquidity: 0.14, volatility: 0.14, tokenRisk: 0.14, gas: 0.04, correlation: 0.06, regime: 0.03, hookRisk: 0.08 },
+  "neutral":  { yield: 0.22, il: 0.18, liquidity: 0.13, volatility: 0.09, tokenRisk: 0.09, gas: 0.04, correlation: 0.09, regime: 0.04, hookRisk: 0.12 },
+  "risk-on":  { yield: 0.32, il: 0.09, liquidity: 0.13, volatility: 0.07, tokenRisk: 0.07, gas: 0.04, correlation: 0.11, regime: 0.07, hookRisk: 0.10 },
 } as const satisfies Record<string, WeightSet>;
 
 /** Convenience alias kept for any callers that still import WEIGHTS. */
@@ -72,8 +72,10 @@ export interface DecisionScorecard {
   correlation: number;
   /** Updated by enrichWithPortfolio; defaults to 75 (neutral regime) */
   regime:      number;
+  /** Hook smart-contract risk: 100 − riskScore. 100 for vanilla pools. */
+  hookRisk:    number;
 
-  /** Weighted composite of the eight scores. */
+  /** Weighted composite of the nine scores. */
   composite:   number;
 
   /** Which weight table was applied ("neutral" until enrichWithPortfolio runs). */
@@ -92,6 +94,7 @@ export interface DecisionScorecard {
     gas:         string;
     correlation: string;
     regime:      string;
+    hookRisk:    string;
   };
 }
 
@@ -104,19 +107,35 @@ const DEFAULT_POS_USD = 2_500;
  * regime to 75 (neutral).  Call enrichWithPortfolio to update those two.
  */
 export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
+  // ── Hook Risk (0–100) — computed first so it feeds into yield ─────────────
+  const hookRiskScore = opp.hookAnalysis
+    ? Math.max(0, 100 - opp.hookAnalysis.riskScore)
+    : 100;  // vanilla pool scores full marks
+  const hookRiskLabel = opp.hookAnalysis
+    ? opp.hookAnalysis.isBlocked
+      ? `BLOCKED riskScore=${opp.hookAnalysis.riskScore} (${opp.hookAnalysis.riskLevel})`
+      : `riskScore=${opp.hookAnalysis.riskScore} (${opp.hookAnalysis.riskLevel}) fee=${opp.hookAnalysis.feeType} ${opp.hookAnalysis.rebalanceType !== "none" ? opp.hookAnalysis.rebalanceType : ""}`
+    : "no hook — vanilla pool";
+
   // ── Yield (0–100) ──────────────────────────────────────────────────────────
+  const hookMultiplier   = opp.hookAnalysis?.netAPYMultiplier ?? 1.0;
+  const incentiveHaircut = opp.hookAnalysis?.incentiveHaircut ?? 1.0;
   const effAPY   = opp.effectiveNetAPY > 0 ? opp.effectiveNetAPY
                  : opp.netAPY         > 0 ? opp.netAPY
                  : opp.displayAPY;
+  const hookAdjEffAPY = effAPY * hookMultiplier * incentiveHaircut;
   // Adverse selection penalty: reduce effective yield by up to 30% when score ≥ 50
   const advPenalty = opp.adverseSelection
     ? Math.max(0, (opp.adverseSelection.score - 50)) / 100 * 0.30
     : 0;
-  const adjEffAPY  = effAPY * (1 - advPenalty);
+  const adjEffAPY  = hookAdjEffAPY * (1 - advPenalty);
   const yieldScore = clamp(adjEffAPY / 50 * 100);
+  const hookNote   = opp.hookAnalysis && (hookMultiplier !== 1.0 || incentiveHaircut !== 1.0)
+    ? ` hook×${hookMultiplier.toFixed(2)} haircut×${incentiveHaircut.toFixed(2)}`
+    : "";
   const yieldLabel = opp.adverseSelection && advPenalty > 0
-    ? `effAPY=${effAPY.toFixed(1)}% → ${adjEffAPY.toFixed(1)}% (adv-sel −${(advPenalty*100).toFixed(0)}%)`
-    : `effAPY=${effAPY.toFixed(1)}%`;
+    ? `effAPY=${effAPY.toFixed(1)}% → ${adjEffAPY.toFixed(1)}%${hookNote} (adv-sel −${(advPenalty*100).toFixed(0)}%)`
+    : `effAPY=${effAPY.toFixed(1)}%${hookNote}`;
 
   // ── IL (0–100) ─────────────────────────────────────────────────────────────
   let ilScore: number;
@@ -180,7 +199,7 @@ export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
   const regLabel = "neutral (pending)";
 
   const weights       = WEIGHTS_BY_REGIME["neutral"];
-  const composite     = computeComposite(yieldScore, ilScore, lqScore, volScore, trScore, gasScore, corrScore, regScore, weights);
+  const composite     = computeComposite(yieldScore, ilScore, lqScore, volScore, trScore, gasScore, corrScore, regScore, hookRiskScore, weights);
   const allocationPct = computeAllocation(opp, composite);
 
   return {
@@ -192,6 +211,7 @@ export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
     gas:         gasScore,
     correlation: corrScore,
     regime:      regScore,
+    hookRisk:    hookRiskScore,
     composite,
     weightSet:   "neutral",
     allocationPct,
@@ -204,6 +224,7 @@ export function computeScorecard(opp: RankedOpportunity): DecisionScorecard {
       gas:         gasLabel,
       correlation: corrLabel,
       regime:      regLabel,
+      hookRisk:    hookRiskLabel,
     },
   };
 }
@@ -262,7 +283,7 @@ export function enrichWithPortfolio(
   const regLabel = `${regime}  ${isStable ? "stable" : "volatile"}${highQuality ? " high-quality" : ""}`;
 
   const weights       = weightsForRegime(regime);
-  const composite     = computeComposite(sc.yield, sc.il, sc.liquidity, sc.volatility, sc.tokenRisk, sc.gas, corrScore, regScore, weights);
+  const composite     = computeComposite(sc.yield, sc.il, sc.liquidity, sc.volatility, sc.tokenRisk, sc.gas, corrScore, regScore, sc.hookRisk ?? 100, weights);
   const allocationPct = computeAllocation(opp, composite);
 
   return {
@@ -288,18 +309,19 @@ function clamp(n: number): number {
 
 function computeComposite(
   yld: number, il: number, lq: number, vol: number,
-  tr: number, gas: number, corr: number, reg: number,
+  tr: number, gas: number, corr: number, reg: number, hookRisk: number,
   w: WeightSet,
 ): number {
   return Math.round(
-    yld  * w.yield      +
-    il   * w.il         +
-    lq   * w.liquidity  +
-    vol  * w.volatility +
-    tr   * w.tokenRisk  +
-    gas  * w.gas        +
-    corr * w.correlation +
-    reg  * w.regime
+    yld      * w.yield       +
+    il       * w.il          +
+    lq       * w.liquidity   +
+    vol      * w.volatility  +
+    tr       * w.tokenRisk   +
+    gas      * w.gas         +
+    corr     * w.correlation +
+    reg      * w.regime      +
+    hookRisk * w.hookRisk
   );
 }
 

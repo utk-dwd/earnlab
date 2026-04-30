@@ -2,6 +2,8 @@
 
 An autonomous Uniswap v4 LP yield optimizer. It scans 18 chains for concentrated liquidity pools, ranks opportunities by risk-adjusted return, and runs a paper-trading portfolio manager that either follows rule-based logic or an LLM Seeker → Critic → Executor pipeline to decide when to enter, hold, and exit positions.
 
+Portfolio strategies can be minted as ownable **INFT strategy agents** (ERC-7857-style) on 0G Galileo testnet — capturing risk profile, scorecard weights, performance history, and LLM config in a transferable on-chain record with metadata stored on 0G Storage.
+
 Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 
 ---
@@ -22,10 +24,19 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │                        │ StablecoinRiskAssessor    │      Portfolio Opt.    │
 │                        │ AdverseSelectionDetector  │      DecisionScorecard │
 │                        │ ScenarioStressTester      │      LLMConfig (runtime│
-│                        │ DecisionScorecard         │       model switching) │
+│                        │ HookAnalyzer (Sourcify)   │       model switching) │
+│                        │ DecisionScorecard (9-dim) │                       │
 │                        └──────────────────────────┘                       │
 │                                                                            │
-│  REST + SSE API  ·  App Wallet signer (viem + APP_WALLET_PRIVATE_KEY) ───►│
+│  REST + SSE API  ·  App Wallet signer (viem + APP_WALLET_PRIVATE_KEY)     │
+│                                                                            │
+│  INFT module (agents/src/inft/)                                            │
+│  ├── INFTContractClient  — viem wrapper for EarnYldAgentINFT.sol           │
+│  ├── AgentMetadataBuilder — builds strategy state bundles                  │
+│  ├── AgentAccessControl  — gates execution by INFT ownership               │
+│  └── ZeroGStorageClient  — uploads/retrieves bundles on 0G Storage        │
+│                                                                            │
+│  EarnYldAgentINFT.sol → 0G Galileo testnet (chain 16602)                  │
 └────────────────────────────────────────────────────────────────────────────┘
                               ▼  HTTP
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -34,9 +45,27 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │  YieldTable (22 columns)   PositionsTable    DecisionFeed   Reflections    │
 │  RiskBudgetPanel           PendingActionsPanel (HITL approve/reject)       │
 │  AppWalletBalances         TransferModal (Send/Receive testnet tokens)     │
-│  LLMSelector               WalletButton (RainbowKit)   Swagger /docs       │
+│  SwapModal (Uniswap V3 + 0G JAINE DEX)        LLMSelector                 │
+│  AgentINFTPanel (mint / clone / authorize / transfer INFTs)                │
+│  WalletButton (RainbowKit)                    Swagger /docs                │
 │                                                                            │
 │  wagmi v2 + RainbowKit v2 — MetaMask / Base Wallet / WalletConnect        │
+└────────────────────────────────────────────────────────────────────────────┘
+                              ▼  HTTP  (optional execution layer)
+┌────────────────────────────────────────────────────────────────────────────┐
+│  KeeperHub  (external — keeperhub.xyz)                                     │
+│                                                                            │
+│  GET /keeper/positions ──► position health snapshots                       │
+│  POST /keeper/signal   ──► full scoring signal + conditions block          │
+│                                                                            │
+│  KeeperHub workflow: schedule trigger → score signal → condition branch    │
+│    → execute tx (remove liquidity / rebalance / approve entry)             │
+│    → retry / gas estimation / nonce management / alert / run log           │
+│                                                                            │
+│  keeperhub-workflow.yaml — three importable workflows:                     │
+│    1. Monitor and Rebalance (every 15 min)                                 │
+│    2. Discover Entry Opportunities (every 1 hr)                            │
+│    3. Hook Risk Change Alert (webhook trigger)                             │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -128,19 +157,104 @@ Eight adversarial scenarios run before any LP entry:
 **Downside Score** = `min(100, max(0, −worstCase × 5))` (0 = all profitable, 100 = worst ≥ −20% loss).
 **Expected Shortfall** = average of the 3 worst scenario returns (CVaR proxy).
 
-### Explainable decision scorecard
-Every ranked opportunity receives an 8-dimension scorecard (0–100 each) with a weighted composite:
+### Uniswap v4 Hook Analyzer
 
-| Dimension | Weight | Measures |
+Uniswap v4 allows pools to attach arbitrary **hook contracts** — logic that runs before or after swaps, liquidity changes, and donations. Hooks can improve LP economics (autocompound fees, dynamic spreads, MEV protection) or destroy them (lock capital, manipulate fees, impose hidden costs). The Hook Analyzer classifies every hooked pool across three axes and folds the result into the scorecard.
+
+#### How hooks work in v4
+
+Each pool specifies a `hooks` address in its key. In v4, this address is **mined**: the lower 14 bits encode which callbacks the hook contract implements. Bit 0 = `beforeInitialize`, bit 1 = `afterInitialize`, bit 12 = `beforeSwap`, bit 13 = `afterSwap`, and so on. A zero address means no hook — a vanilla concentrated LP.
+
+```
+Pool key: (currency0, currency1, fee, tickSpacing, hooks)
+                                                    ^
+                                         lower 14 bits = active callbacks
+```
+
+`decodeHookFlags(hookAddress)` reads these bits via `@uniswap/v4-sdk`'s `hookFlagIndex` and returns the list of active callback names. This runs for every pool on every scan.
+
+#### Fee type classification
+
+| Fee type | Condition | Effect on LP |
 |---|---|---|
-| Yield | 25% | effectiveNetAPY potential, adverse-selection adjusted |
-| IL | 20% | Protection from impermanent loss (`1 − IL/APY`) |
-| Liquidity | 15% | liquidityQuality score |
-| Volatility | 10% | Time-in-range + price-move penalty |
-| Token Risk | 10% | Inverse GoPlus score (0 = BLOCKED, 100 = clean) |
-| Gas | 5% | Break-even speed (7-day BE → 0, same-block → 100) |
-| Correlation | 10% | Portfolio diversification benefit |
-| Regime | 5% | Macro regime fit (risk-off+stable → 90) |
+| `static` | No `beforeSwap` callback | Fee tier is fixed. APY prediction is reliable. |
+| `dynamic-unknown` | `beforeSwap` present | Hook can widen or narrow the spread on every swap. Actual fee income may differ substantially from the stated tier. APY haircut applied. |
+
+#### Incentive model classification
+
+| Incentive type | Condition | Effect on LP |
+|---|---|---|
+| `real-fees` | No `afterSwap` / `afterAddLiquidity` | Fees go directly to LPs as pool tokens. Safest. APY haircut ×1.00. |
+| `hook-native-rewards` | `afterSwap` or `afterAddLiquidity` present | Hook intercepts some or all fees and redistributes as hook-specific rewards. Rewards may be illiquid, time-locked, or subject to hook governance. APY haircut ×0.60. |
+| `points-airdrop` | Manually labelled (future) | Rewards are offchain points with uncertain redemption. APY haircut ×0.10. |
+
+#### Rebalance type classification
+
+| Rebalance type | Condition | LP benefit |
+|---|---|---|
+| `none` | No relevant callbacks | Vanilla LP. Range management is manual. |
+| `auto-compound` | `afterAddLiquidity` only | Hook reinvests accrued fees back into the position automatically. Improves effective APY for idle capital. |
+| `range-rebalance` | `beforeAddLiquidity` + `afterAddLiquidity` | Hook repositions the LP range based on price movement. Increases time-in-range at the cost of additional gas and potential slippage on rebalance. |
+
+#### Smart-contract risk score (0–100)
+
+Risk is accumulated based on callback surface, source code availability, TVL, and pool age:
+
+| Signal | Points | Why it matters |
+|---|---|---|
+| `beforeRemoveLiquidity` in callbacks | +30 | Hook can block or delay LP withdrawals — the most dangerous callback for capital lockup |
+| `beforeAddLiquidity` in callbacks | +15 | Hook can revert liquidity additions, effectively restricting pool access |
+| `beforeSwap` in callbacks | +10 | Dynamic fee control — hook can charge any spread on any swap |
+| 6+ total callbacks | +15 | Larger attack surface; more logic paths that could interact adversarially |
+| Source code not on Sourcify | +25 | No human-readable verification of what the hook actually does |
+| TVL > $500K and source unverified | +10 | Unverified high-value hook is a higher-priority concern |
+| Pool age < 7 days | +15 | No track record — insufficient time to detect anomalous behaviour |
+
+**Risk levels and scorecard impact:**
+
+| Level | Score range | `netAPYMultiplier` | Dashboard badge |
+|---|---|---|---|
+| Low | < 25 | ×1.10 | ✓ green — hook likely improves LP economics |
+| Medium | 25–49 | ×0.95 | ⚠ yellow — some risk, minor discount applied |
+| High | 50–84 | ×0.85 | ⚡ orange — significant surface area, notable discount |
+| Critical | ≥ 85 | ×0.70 + blocked | 🚫 red — agent will not enter; blocked from ranking |
+
+A low-risk hook with auto-compound or range-rebalance actually **boosts effective APY** above the naive fee APY via the ×1.10 multiplier — rewarding good hook design.
+
+#### Source verification (Sourcify)
+
+The analyzer calls the [Sourcify](https://sourcify.dev) public API to check whether the hook contract's source code is verified (`perfect` or `partial` match). Results are cached for 24 hours per address/chain pair to avoid repeated network calls. An unverified contract adds +25 risk points — for a $500K+ TVL pool this rises to +35.
+
+#### Integration with the scorecard
+
+`hookAnalysis` feeds into `computeScorecard` in two ways:
+
+1. **Yield dimension** — effective APY is multiplied by `netAPYMultiplier × incentiveHaircut` before scoring. A `hook-native-rewards` pool with `riskLevel=medium` has its APY scaled to `0.95 × 0.60 = 0.57` of face value before the yield score is computed.
+
+2. **Hook Risk dimension (9th)** — `hookRiskScore = 100 − riskScore`. Vanilla pools score 100. This feeds into the weighted composite with 8–12% weight depending on regime:
+
+| Regime | Hook Risk weight | Rationale |
+|---|---|---|
+| `risk-off` | 8% | Capital preservation dominates; IL and token risk are already elevated |
+| `neutral` | 12% | Highest weight — maximum attention to hook smart-contract risk in normal conditions |
+| `risk-on` | 10% | Yield focus, but hooks still matter for capital safety |
+
+### Explainable decision scorecard
+Every ranked opportunity receives a **9-dimension scorecard** (0–100 each) with a regime-conditional weighted composite:
+
+| Dimension | Neutral weight | Risk-off weight | Risk-on weight | Measures |
+|---|---|---|---|---|
+| Yield | 22% | 9% | 32% | effectiveNetAPY × hook multiplier × incentive haircut, adverse-selection adjusted |
+| IL | 18% | 28% | 9% | Protection from impermanent loss (`1 − IL/APY`) |
+| Liquidity | 13% | 14% | 13% | liquidityQuality score |
+| Volatility | 9% | 14% | 7% | Time-in-range + price-move penalty |
+| Token Risk | 9% | 14% | 7% | Inverse GoPlus score (0 = BLOCKED, 100 = clean) |
+| Gas | 4% | 4% | 4% | Break-even speed (7-day BE → 0, same-block → 100) |
+| Correlation | 9% | 6% | 11% | Portfolio diversification benefit |
+| Regime | 4% | 3% | 7% | Macro regime fit (risk-off+stable → 90) |
+| **Hook Risk** | **12%** | **8%** | **10%** | **100 − hook riskScore (100 for vanilla pools)** |
+
+All weight sets sum to 1.00. The regime is detected from median ETH Δ7d across all ETH pools.
 
 **Kelly allocation** = `min(30%, kellyBase × composite/100)` where `kellyBase = (RAR7d−1)/RAR7d × 25`.
 
@@ -281,6 +395,246 @@ Both tabs support all five testnets and the token registry for each:
 | Unichain Sepolia | ETH |
 
 Switching network in the dropdown triggers `switchChainAsync` — MetaMask prompts to switch. Transaction hashes link to the correct block explorer.
+
+### Token Swap panel
+
+A **🔄 Swap** button in the header opens a modal for swapping tokens held in the app wallet — letting the portfolio manager acquire the exact tokens a top yield pool requires before entering.
+
+**Supported networks and DEXes:**
+
+| Chain | Chain ID | DEX | Router |
+|---|---|---|---|
+| Sepolia | 11155111 | Uniswap V3 | SwapRouter02 |
+| Base Sepolia | 84532 | Uniswap V3 | SwapRouter02 |
+| OP Sepolia | 11155420 | Uniswap V3 | SwapRouter02 |
+| Arb Sepolia | 421614 | Uniswap V3 | SwapRouter02 |
+| Unichain Sepolia | 1301 | Uniswap V3 | SwapRouter02 |
+| 0G Network | 16661 | JAINE DEX (Uniswap V3 fork) | JAINE Router |
+
+**How a swap executes** (all steps are server-side, signed by `APP_WALLET_PRIVATE_KEY`):
+
+1. **Quote** — `POST /swap/quote` calls `QuoterV2.quoteExactInputSingle` via `simulateContract` (eth_call, read-only). Auto-discovers the best fee tier by trying 500 → 3000 → 10000 bps and returning the tier with the highest `amountOut`.
+2. **Approve** (if needed) — checks `ERC20.allowance(appWallet, router)`. If allowance is below `amountIn`, the backend approves `MAX_UINT256` and waits for the approval receipt before continuing.
+3. **Swap** — calls `SwapRouter02.exactInputSingle` with `amountOutMinimum = quote × (1 − slippageBps/10000)`.
+
+**UI features:**
+- Live quote with 500 ms debounce — updates on every amount or token change
+- Balance display for the app wallet (via wagmi `useBalance`) for all Uniswap testnets
+- **Suggested tokens** — cross-references the top 5 yield pools on the selected chain with the token registry and shows quick-select chips for tokens needed to enter those pools
+- Slippage preset buttons: 0.25% / 0.5% / 1%
+- Pool fee tier shown after quote (e.g. "Pool fee: 0.3%")
+- ⇅ direction swap button to reverse From/To
+- Explorer link on success
+
+**0G JAINE DEX** is a Uniswap V3 fork deployed on the 0G Network (chain ID 16661, RPC `https://evmrpc.0g.ai`). It uses the same `exactInputSingle` ABI as SwapRouter02 and the same `quoteExactInputSingle` ABI as QuoterV2 — no code changes are needed to support it beyond the chain configuration.
+
+**API endpoints:**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/swap/chains` | All supported swap chains with token registries |
+| POST | `/swap/quote` | Simulate swap; returns `amountOutFormatted`, `fee`. Body: `{ chainId, tokenIn, tokenOut, amountIn, decimalsIn, fee? }` |
+| POST | `/swap/execute` | Approve + swap via app wallet. Body: `{ chainId, tokenIn, tokenOut, amountIn, decimalsIn, fee, slippageBps? }` |
+
+---
+
+### KeeperHub Integration
+
+> **Design principle: EarnYld decides. KeeperHub executes.**
+
+EarnYld handles the intelligence layer — pool discovery, hook risk analysis, portfolio scoring, risk budget enforcement, and LLM-driven decisions. **KeeperHub** handles the operational layer — scheduled monitoring, transaction execution, gas estimation, nonce management, retries, failure alerting, and run logs. Neither component does both jobs.
+
+This separation means EarnYld never hand-rolls keeper infrastructure, and KeeperHub never runs AI inference.
+
+#### API contract
+
+Two dedicated endpoints expose the agent's decisions as structured data for KeeperHub condition nodes:
+
+**`GET /keeper/positions`** — Returns every open position with a pre-evaluated `conditions` block. KeeperHub can branch directly on these booleans without calling the scoring API separately.
+
+```json
+{
+  "positionId": "1714123456789-1",
+  "pair": "WETH/USDC",
+  "chainName": "Base Sepolia",
+  "compositeScore": 78,
+  "hookIsBlocked": false,
+  "tvlUsd": 840000,
+  "inRange": true,
+  "conditions": {
+    "inRange": true,
+    "scoreOk": true,
+    "hookRiskOk": true,
+    "tvlOk": true,
+    "shouldAlert": false,
+    "shouldRebalance": false,
+    "shouldExit": false
+  }
+}
+```
+
+**`POST /keeper/signal`** — Full scoring signal for a specific pool or position. Accepts `{ poolId?, positionId? }`. Returns all condition booleans plus a `recommendation` ("enter" / "hold" / "rebalance" / "alert" / "exit" / "skip") and a `reasoning` string for use in notification messages.
+
+```json
+{
+  "signalType": "position",
+  "compositeScore": 78,
+  "hookRiskScore": 90,
+  "effectiveNetAPY": 41.2,
+  "tvlUsd": 840000,
+  "conditions": {
+    "scoreOk": true,
+    "hookRiskOk": true,
+    "tvlOk": true,
+    "volumeOk": true,
+    "positionInRange": true,
+    "shouldAlert": false,
+    "shouldRebalance": false,
+    "shouldExit": false,
+    "canEnterNew": true
+  },
+  "recommendation": "hold",
+  "reasoning": "Score 78/100, TiR 84.2%, no exit triggers"
+}
+```
+
+**Condition thresholds** (aligned with PortfolioManager constants):
+
+| Condition | Rule |
+|---|---|
+| `scoreOk` | `compositeScore >= 60` |
+| `hookRiskOk` | `!hookAnalysis.isBlocked` |
+| `tvlOk` | `tvlUsd >= $50,000` |
+| `volumeOk` | `volume24hUsd > 0` |
+| `positionInRange` | `timeInRangePct >= 80%` |
+| `shouldAlert` | Any exit alert is active |
+| `shouldRebalance` | Out of range + held ≥ 24h + not a critical exit |
+| `shouldExit` | Critical exit signal (RAR deterioration, stale position, price move, hook block) |
+| `canEnterNew` | All four entry conditions pass |
+
+#### Workflow file
+
+`keeperhub-workflow.yaml` at the project root contains three complete workflows ready to import into your KeeperHub account:
+
+**Workflow 1 — Monitor and Rebalance** (every 15 minutes)
+```
+Schedule trigger (15 min)
+  → GET /keeper/positions         # fetch all open positions
+  → forEach position:
+      POST /keeper/signal         # score + conditions
+      → branch: shouldExit?       → notify Discord/Telegram + record exit intent
+      → branch: shouldRebalance?  → notify Discord + optionally call onchain remove/add
+      → branch: shouldAlert?      → notify Discord
+      → branch: healthy?          → log "✓ WETH/USDC healthy — score 78, TiR 84%"
+  → log run complete
+```
+
+**Workflow 2 — Discover Entry Opportunities** (every 1 hour)
+```
+Schedule trigger (1 hr)
+  → GET /yields?limit=5           # top-ranked pools
+  → forEach pool:
+      POST /keeper/signal
+      → branch: canEnterNew?      → notify Discord with full scorecard summary
+      → branch: blocked?          → log skip reason
+```
+
+**Workflow 3 — Hook Risk Change Alert** (webhook trigger)
+```
+Webhook trigger (EarnYld posts on hook risk change)
+  → branch: riskLevel == critical → notify Discord + Telegram: exit immediately
+  → branch: riskLevel == high     → notify Discord: reduce allocation
+  → branch: resolved              → log resolution
+```
+
+KeeperHub condition nodes read fields like `{{steps.pool_signal.conditions.shouldExit}}` directly — no text parsing required.
+
+#### Why this matters
+
+Building keeper infrastructure in-house means writing your own: gas price oracle, retry logic with exponential backoff, nonce sequence management across concurrent transactions, mempool monitoring, failure alerting, and structured run logs. These are all solved by KeeperHub. EarnYld's scoring model is the differentiator; the execution plumbing is not.
+
+```
+EarnYld                    KeeperHub
+──────────────────────     ────────────────────────────────
+Pool discovery             Scheduled trigger management
+Hook risk analysis         Gas estimation + price oracle
+Regime detection           Nonce ordering across txs
+9-dimension scoring        Transaction retry + backoff
+Portfolio optimisation     Failure alerting (Discord/TG/email)
+LLM Seeker/Critic          Structured run logs
+Risk budget enforcement    Conditional workflow branching
+                           onchain read/write contract actions
+```
+
+---
+
+### INFT Strategy Agents
+
+> **Turn your AI portfolio agent into an ownable, transferable NFT.**
+
+Every portfolio agent in EarnYld can be minted as an **ERC-7857-style Intelligent NFT** on the **0G Galileo testnet** (chain ID 16602). The INFT captures the full strategy configuration — risk profile, scorecard weights, LLM model, hook preferences, and live performance stats — in an immutable on-chain record.
+
+Off-chain metadata is stored on **0G Storage** and referenced via the `storageUri` field. This means the agent's strategy state is content-addressed (SHA-256 root hash) and survives even if the EarnYld backend goes offline.
+
+#### My Strategy Agents panel
+
+Click **🤖 Agents** in the header to open the Strategy Agents panel. From there you can:
+
+- **View all INFTs** owned by any wallet address — shows token ID, name, risk profile, permissions, PnL, and 0G Storage URI
+- **Mint a new agent** — choose a strategy archetype, optionally override the agent name, enter a recipient wallet, and mint to 0G Galileo testnet in one click
+- **Clone** — fork an existing strategy to a new owner wallet (mints a new INFT with `parentTokenId` set)
+- **Authorize** — grant or revoke execution rights for another wallet without transferring ownership (ERC-7857 delegation)
+- **Transfer** — standard ERC-721 transfer to a new owner
+
+The panel runs in **demo mode** when `INFT_CONTRACT_ADDRESS` is not set, so you can preview the UI before deploying the contract.
+
+#### Strategy archetypes
+
+| Type | Risk | Max Alloc | Description |
+|------|------|-----------|-------------|
+| `conservative-stable` | low | 10% | Stablecoin-only pools; IL-first scoring; HITL required |
+| `eth-usdc-harvest` | moderate | 25% | ETH-denominated pairs; balanced scoring; HITL required |
+| `hook-aware-aggressive` | high | 30% | v4 hooked pools with dynamic fees; yield-first; HITL required |
+| `testnet-research` | low | 50% | Paper-trades testnet pools; fully autonomous |
+
+#### INFT permissions model
+
+Each INFT carries three permission flags that gate agent execution:
+
+```json
+{
+  "canExecute":       false,
+  "requiresHITL":     true,
+  "maxAllocationPct": 25
+}
+```
+
+`AgentAccessControl` checks these on every portfolio action. In demo mode (no contract address) all checks pass. If the contract call fails, the system **fails open** (`allowed=true`) but forces HITL and caps allocation at 10% as a safety measure.
+
+#### API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/inft/mint-agent` | Build metadata → upload to 0G Storage → mint INFT |
+| `GET`  | `/inft/agents/:owner` | List all INFTs owned by a wallet |
+| `GET`  | `/inft/:tokenId/metadata` | Fetch on-chain state + off-chain metadata bundle |
+| `POST` | `/inft/:tokenId/authorize` | Grant/revoke execution rights for a user |
+| `POST` | `/inft/:tokenId/clone` | Fork strategy to a new owner wallet |
+| `POST` | `/inft/:tokenId/transfer` | Transfer INFT to a new owner |
+
+#### Deploying the INFT contract
+
+```bash
+cd contracts
+npx hardhat run scripts/deploy.ts --network zerog-galileo
+# Set INFT_CONTRACT_ADDRESS in .env with the deployed address
+```
+
+Contract: `contracts/EarnYldAgentINFT.sol` — ERC-721 base extended with `mintAgent`, `clone`, `authorizeUsage`, `updateStorageUri`. Deploys to 0G Galileo (chain 16602, RPC `https://evmrpc-testnet.0g.ai`).
+
+Token URI format: `0g://{storageUri}` — resolves via the 0G Storage indexer.
+
+---
 
 ### Application wallet
 
@@ -456,6 +810,8 @@ Full-viewport layout with a right sidebar for AI reflections and decisions.
 - Refresh button
 - API Docs link
 - 🤖 Choose LLM — opens model selector panel
+- 🔄 Swap — opens token swap modal (Uniswap V3 testnets + 0G JAINE DEX)
+- 🤖 Agents — opens Strategy Agents panel (INFT mint / view / clone / authorize / transfer)
 - 💸 Transfer — opens Send/Receive testnet token modal
 - Connect Wallet / address chip / Disconnect (RainbowKit)
 
@@ -464,7 +820,7 @@ Full-viewport layout with a right sidebar for AI reflections and decisions.
 - **Stats bar** — Pools Found, Open Positions, Total Trades, Fees Earned, Unrealised PnL, Last Decision badge
 - **Risk Budget panel** — six progress bars (chain, token, volatile, issuer, pool, cash). Red when a constraint is breached
 - **Pending Actions panel** (HITL mode only) — queued decisions with Approve / Reject buttons and rich execution failure feedback
-- **Yield Opportunities tab** — 22-column table sorted by Effective Net APY. All columns have hover tooltips. Sortable by Eff. APY, RAR, TVL, LQ, Persistence, Stress score, and Scorecard composite
+- **Yield Opportunities tab** — 22-column table sorted by Effective Net APY. All columns have hover tooltips. Sortable by Eff. APY, RAR, TVL, LQ, Persistence, Stress score, and Scorecard composite. Hook column shows ✓/⚠/⚡/🚫 risk badges; scorecard tooltip shows all 9 dimensions including Hook Risk
 - **Positions tab** — open and closed positions with time-in-range progress bar, exit alerts, grade (A–F), and realised APY
 
 **Right sidebar**
@@ -499,6 +855,17 @@ Interactive Swagger UI at **http://localhost:3000/docs**.
 | POST | `/pending-actions/:id/approve` | Execute a pending action. Returns 409 if stale, 422 if execution failed with reason |
 | POST | `/pending-actions/:id/reject` | Discard a pending action |
 | POST | `/wallet/send` | App wallet signs and broadcasts a testnet transfer. Body: `{ chainId, to, amount, tokenAddress?, decimals? }` |
+| GET | `/swap/chains` | All supported swap chains with DEX name and token registries |
+| POST | `/swap/quote` | Simulate a V3 single-hop swap via QuoterV2; auto-discovers best fee tier. Body: `{ chainId, tokenIn, tokenOut, amountIn, decimalsIn, fee? }` |
+| POST | `/swap/execute` | ERC20 approve (if needed) + swap via app wallet. Body: `{ chainId, tokenIn, tokenOut, amountIn, decimalsIn, fee, slippageBps? }` |
+| GET | `/keeper/positions` | Open position health snapshots with pre-evaluated `conditions` block for KeeperHub |
+| POST | `/keeper/signal` | Full scoring signal for a pool or position. Returns `conditions` + `recommendation` + `reasoning`. Body: `{ poolId?, positionId? }` |
+| POST | `/inft/mint-agent` | Build metadata → upload to 0G Storage → mint INFT on 0G Galileo. Body: `{ to, strategyType?, name?, version? }` |
+| GET | `/inft/agents/:owner` | List all INFT strategy agents owned by a wallet |
+| GET | `/inft/:tokenId/metadata` | Fetch on-chain agent state + off-chain metadata bundle from 0G Storage |
+| POST | `/inft/:tokenId/authorize` | Grant or revoke execution rights for a user. Body: `{ user, authorized? }` |
+| POST | `/inft/:tokenId/clone` | Fork strategy to a new owner wallet. Body: `{ cloneOwner }` |
+| POST | `/inft/:tokenId/transfer` | ERC-721 transfer. Body: `{ from, to }` |
 | GET | `/health` | Liveness check |
 
 ### Shared API contract
@@ -511,9 +878,13 @@ The frontend re-exports opportunity and enrichment contract types from `agents/s
 
 ```
 earnYld/
+├── keeperhub-workflow.yaml               # Three importable KeeperHub workflows
+│                                         #   (Monitor+Rebalance, Entry Discovery, Hook Alert)
+├── contracts/
+│   └── EarnYldAgentINFT.sol              # ERC-7857-style INFT contract (0G Galileo testnet)
 ├── agents/
 │   └── src/
-│       ├── index.ts                          # Entry point
+│       ├── index.ts                          # Entry point; initialises ZeroGStorageClient
 │       ├── ReporterAgent.ts                  # Scans chains, enrichment pipeline,
 │       │                                     #   ranks opportunities
 │       ├── PortfolioManager.ts               # Portfolio simulation, Kelly sizing,
@@ -529,13 +900,25 @@ earnYld/
 │       │   ├── StablecoinRiskAssessor.ts     # Peg, issuer, bridge, chain risk
 │       │   ├── AdverseSelectionDetector.ts   # Toxic flow detection (4 signals)
 │       │   ├── ScenarioStressTester.ts       # 8-scenario 30d stress test
-│       │   ├── DecisionScorecard.ts          # 8-dimension weighted scorecard
+│       │   ├── HookAnalyzer.ts               # v4 hook classification + risk score
+│       │   │                                 #   (Sourcify, fee/incentive/rebalance)
+│       │   ├── DecisionScorecard.ts          # 9-dimension weighted scorecard
 │       │   ├── PortfolioOptimizer.ts         # Marginal-Sharpe greedy allocator
 │       │   └── RiskBudget.ts                 # Portfolio-level constraint checks
 │       ├── llm/
 │       │   ├── LLMClient.ts                  # Seeker + Critic LLM calls (OpenRouter)
 │       │   ├── ReflectionAgent.ts            # Hourly streaming reflection
 │       │   └── LLMConfig.ts                  # Mutable model singleton (getModel/setModel)
+│       ├── og/
+│       │   └── ZeroGStorageClient.ts         # Upload/retrieve agent state bundles
+│       │                                     #   on 0G Storage (sha256 content URIs)
+│       ├── inft/
+│       │   ├── INFTContractClient.ts         # viem wrapper for EarnYldAgentINFT.sol
+│       │   │                                 #   (mint, clone, authorize, transfer, read)
+│       │   ├── AgentMetadataBuilder.ts       # Builds AgentINFTMetadata from portfolio state
+│       │   │                                 #   (4 strategy archetypes with preset weights)
+│       │   └── AgentAccessControl.ts         # Gates portfolio execution by INFT ownership;
+│       │                                     #   fail-open with forced HITL on error
 │       ├── storage/
 │       │   ├── ZeroGMemory.ts                # 0G KV episodic memory (RAG)
 │       │   ├── ReflectionStore.ts            # SQLite reflection persistence
@@ -543,7 +926,8 @@ earnYld/
 │       │   └── SnapshotStore.ts              # SQLite ranked + portfolio snapshots
 │       ├── api/
 │       │   ├── server.ts                     # Express REST + SSE endpoints
-│       │   └── types.ts                      # Shared API contract types
+│       │   │                                 #   (swap, keeper, wallet, portfolio, inft)
+│       │   └── types.ts                      # Shared API contract types (incl. INFT)
 │       └── config/
 │           └── chains.ts                     # Chain configs, tick spacings,
 │                                             #   gas estimates, known tokens
@@ -560,7 +944,9 @@ earnYld/
         │   ├── PendingActionsPanel.tsx       # HITL approve/reject with rich failure detail
         │   ├── WalletButton.tsx              # RainbowKit connect/disconnect button
         │   ├── TransferModal.tsx             # Send/Receive testnet token modal
+        │   ├── SwapModal.tsx                 # Token swap (Uniswap V3 + 0G JAINE DEX)
         │   ├── AppWalletBalances.tsx         # Live app wallet balance widget (all testnets)
+        │   ├── AgentINFTPanel.tsx            # Strategy agent INFT — mint/clone/authorize/transfer
         │   └── LLMSelector.tsx              # OpenRouter model picker (18 models, 6 providers)
         ├── lib/
         │   └── wagmiConfig.ts                # wagmi + RainbowKit chain configuration
@@ -587,12 +973,19 @@ earnYld/
 | `ZEROG_INDEXER_URL` | `https://indexer-storage-testnet-turbo.0g.ai` | 0G storage indexer |
 | `ZEROG_KV_URL` | `http://3.101.147.150:6789` | 0G KV endpoint |
 | `ZEROG_STREAM_ID` | (hardcoded default) | 0G KV stream for decision records |
+| `ZEROG_AGENT_STREAM_ID` | (hardcoded default) | 0G KV stream for INFT agent state bundles |
+| `INFT_CONTRACT_ADDRESS` | — | Deployed address of EarnYldAgentINFT.sol on 0G Galileo; demo mode if unset |
 | `MAX_SLIPPAGE_BPS` | `50` | Slippage guard threshold (0.5%) |
 | `NEXT_PUBLIC_AGENT_API_URL` | `http://localhost:3001` | Frontend → agent URL |
 | `APP_WALLET_PRIVATE_KEY` | — | Private key for the EarnYld app wallet (server-only, never exposed to browser) |
 | `NEXT_PUBLIC_APP_WALLET_ADDRESS` | — | Public address of the app wallet — shown in the Transfer modal and balance widget |
 | `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | `earnYld_placeholder` | WalletConnect project ID (get one at cloud.walletconnect.com) |
 | `THEGRAPH_API_KEY` | — | Enables The Graph Uniswap v4 subgraph enrichment |
+| `SEPOLIA_RPC_URL` | `https://rpc.sepolia.org` | RPC for Sepolia swap/quote calls |
+| `BASE_SEPOLIA_RPC_URL` | `https://sepolia.base.org` | RPC for Base Sepolia swap/quote calls |
+| `OP_SEPOLIA_RPC_URL` | `https://sepolia.optimism.io` | RPC for OP Sepolia swap/quote calls |
+| `ARB_SEPOLIA_RPC_URL` | `https://sepolia-rollup.arbitrum.io/rpc` | RPC for Arb Sepolia swap/quote calls |
+| `UNICHAIN_SEPOLIA_RPC_URL` | `https://sepolia.unichain.org` | RPC for Unichain Sepolia swap/quote calls |
 
 ---
 
@@ -628,7 +1021,7 @@ PAST OUTCOMES — similar conditions (0G memory):
 
 EarnYld integrates the Uniswap v4 protocol and SDK stack at every layer of the agent — from pool discovery to position sizing to UI display.
 
-### `@uniswap/v4-sdk` — Hook flag decoding
+### `@uniswap/v4-sdk` — Hook flag decoding and risk analysis
 
 Every pool returned by the scanner is analysed for active hook callbacks using the SDK's `hookFlagIndex` map.
 
@@ -643,7 +1036,16 @@ export function decodeHookFlags(hooksAddress: string): string[] {
 }
 ```
 
-In Uniswap v4, the hooks contract address is mined so that its lower 14 bits encode which of the 14 hook points (`beforeSwap`, `afterSwap`, `beforeAddLiquidity`, etc.) are implemented. `decodeHookFlags` reads these bits using the SDK's authoritative bit-position map and returns the list of active callbacks. The frontend displays this per-pool as a 🔵 badge with a tooltip listing all active callbacks.
+In Uniswap v4, the hooks contract address is mined so that its lower 14 bits encode which of the 14 hook points (`beforeSwap`, `afterSwap`, `beforeAddLiquidity`, etc.) are implemented. `decodeHookFlags` reads these bits using the SDK's authoritative bit-position map and returns the list of active callbacks.
+
+The decoded callbacks feed directly into `HookAnalyzer.ts`, which uses them to:
+- Classify **fee type** (`static` vs `dynamic-unknown` when `beforeSwap` is active)
+- Classify **incentive model** (`real-fees` vs `hook-native-rewards` when `afterSwap`/`afterAddLiquidity` intercepts fees)
+- Classify **rebalance behaviour** (`auto-compound`, `range-rebalance`, or `none`)
+- Accumulate a **risk score** based on which callbacks are present (e.g. `beforeRemoveLiquidity` = +30 for capital lockup risk)
+- Apply a `netAPYMultiplier` (×1.10 for low-risk to ×0.70 for critical) and an `incentiveHaircut` to discount uncertain reward streams
+
+The result feeds into the 9th scorecard dimension (`hookRisk`) and adjusts the effective yield used in the Yield dimension. The frontend shows ✓/⚠/⚡/🚫 colour-coded risk badges per pool with a hover tooltip detailing the score, callbacks, source verification status, fee type, and rebalance type.
 
 ### `@uniswap/v4-sdk` — Pool key and pool ID
 

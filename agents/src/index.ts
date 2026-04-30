@@ -5,10 +5,13 @@ import { ReporterAgent }    from "./ReporterAgent";
 import { PortfolioManager } from "./PortfolioManager";
 import { ReflectionAgent }  from "./llm/ReflectionAgent";
 import { startApiServer }   from "./api/server";
+import { zeroGStorage }     from "./og/ZeroGStorageClient";
 
 const API_PORT = Number(process.env.AGENT_API_PORT ?? 3001);
 
 async function main() {
+  await zeroGStorage.init();
+
   const reporter   = new ReporterAgent();
   const portfolio  = new PortfolioManager(reporter);
   const reflection = new ReflectionAgent(reporter, portfolio);

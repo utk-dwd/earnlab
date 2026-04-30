@@ -301,9 +301,9 @@ function fallbackScorecard(opp: RankedOpportunity): DecisionScorecard {
   const comp   = Math.round(Math.min(100, effAPY / 50 * 60 + 20));
   return {
     yield: Math.min(100, effAPY / 50 * 100), il: 50, liquidity: opp.liquidityQuality || 50,
-    volatility: 50, tokenRisk: 50, gas: 50, correlation: 50, regime: 75,
+    volatility: 50, tokenRisk: 50, gas: 50, correlation: 50, regime: 75, hookRisk: 100,
     composite: comp, weightSet: "neutral", allocationPct: Math.min(30, comp * 0.25),
     labels: { yield: `effAPY=${effAPY.toFixed(1)}%`, il: "n/a", liquidity: `lq=${opp.liquidityQuality}`,
-      volatility: "n/a", tokenRisk: "n/a", gas: "n/a", correlation: "pending", regime: "pending" },
+      volatility: "n/a", tokenRisk: "n/a", gas: "n/a", correlation: "pending", regime: "pending", hookRisk: "pending" },
   };
 }

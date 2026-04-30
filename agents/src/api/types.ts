@@ -1,6 +1,24 @@
 // Shared API contract types. Keep this file free of runtime imports so the
 // frontend can import these types without pulling agent code into the bundle.
 
+export type HookFeeType       = "static" | "dynamic-unknown";
+export type HookIncentiveType = "real-fees" | "hook-native-rewards" | "points-airdrop";
+export type HookRebalanceType = "none" | "auto-compound" | "range-rebalance";
+
+export interface HookAnalysisResult {
+  hookAddress:      string;
+  callbacks:        string[];
+  feeType:          HookFeeType;
+  incentiveType:    HookIncentiveType;
+  rebalanceType:    HookRebalanceType;
+  riskScore:        number;
+  riskLevel:        "low" | "medium" | "high" | "critical";
+  isBlocked:        boolean;
+  sourceVerified:   boolean;
+  netAPYMultiplier: number;
+  incentiveHaircut: number;
+}
+
 export interface CritiqueResult {
   veto:       boolean;
   confidence: number;
@@ -103,6 +121,7 @@ export interface DecisionScorecard {
   gas:         number;
   correlation: number;
   regime:      number;
+  hookRisk:    number;
   composite:   number;
   weightSet:   "risk-off" | "neutral" | "risk-on";
   allocationPct: number;
@@ -115,6 +134,7 @@ export interface DecisionScorecard {
     gas:         string;
     correlation: string;
     regime:      string;
+    hookRisk:    string;
   };
 }
 
@@ -171,7 +191,8 @@ export type EnrichmentStage =
   | "stressTest"
   | "scorecard"
   | "tokenRisk"
-  | "stablecoinRisk";
+  | "stablecoinRisk"
+  | "hookAnalysis";
 
 export interface EnrichmentError {
   stage:     EnrichmentStage;
@@ -225,7 +246,60 @@ export interface RankedOpportunity {
   scorecard:            DecisionScorecard | null;
   hookFlags:            string[];
   hasCustomHooks:       boolean;
+  hookAddress:          string;
+  hookAnalysis:         HookAnalysisResult | null;
   enrichmentDegraded:   boolean;
   enrichmentErrors:     EnrichmentError[];
   lastUpdated:          number;
+}
+
+// ─── INFT types (ERC-7857-style Intelligent NFT for strategy agents) ──────────
+
+export interface AgentPermissions {
+  canExecute:       boolean;
+  requiresHITL:     boolean;
+  maxAllocationPct: number;
+}
+
+export interface AgentPerformanceStats {
+  totalTrades:   number;
+  openPositions: number;
+  totalPnlUsd:   number;
+  totalFeesUsd:  number;
+  avgAPY:        number;
+  regime:        string;
+}
+
+export interface AgentINFTMetadata {
+  schemaVersion:    "1.0";
+  name:             string;
+  strategyType:     string;
+  riskProfile:      "low" | "moderate" | "high";
+  description:      string;
+  modelConfig:      string;
+  scorecardWeights: Record<string, number>;
+  performance:      AgentPerformanceStats;
+  permissions:      AgentPermissions;
+  hookPreferences:  { maxRiskScore: number; preferAutoComp: boolean };
+  snapshotAt:       number;
+  note:             string;
+}
+
+export interface OnChainAgentState {
+  tokenId:       number;
+  owner:         string;
+  name:          string;
+  strategyType:  string;
+  riskProfile:   string;
+  storageUri:    string;
+  version:       string;
+  permissions:   AgentPermissions;
+  mintedAt:      number;
+  parentTokenId: number;
+}
+
+export interface AgentINFTRecord {
+  onChain:  OnChainAgentState;
+  metadata: AgentINFTMetadata | null;
+  explorerUrl: string;
 }

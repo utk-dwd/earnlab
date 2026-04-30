@@ -1,0 +1,342 @@
+# EarnYld × KeeperHub Integration
+# ──────────────────────────────────────────────────────────────────────────────
+# Architecture: EarnYld decides, KeeperHub executes.
+#
+# EarnYld agent handles: pool discovery, hook risk analysis, scoring,
+#   portfolio decisions, risk budget enforcement.
+#
+# KeeperHub handles: scheduled monitoring, tx execution, gas estimation,
+#   nonce management, retries, failure alerting, run logs.
+#
+# API contract: POST /keeper/signal returns a `conditions` block with one
+# boolean per decision branch. KeeperHub condition nodes route on these
+# booleans — no AI inference happens inside KeeperHub.
+#
+# Import this file into your KeeperHub account or use it as a reference
+# when building workflows in the KeeperHub UI.  Variable placeholders
+# ({{env.X}}) should be set in your KeeperHub environment config.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Workflow 1: Monitor and Rebalance LP Positions ────────────────────────────
+#
+# Runs every 15 minutes. For each open position, calls the EarnYld signal API
+# and routes to: hold / alert / rebalance / exit.
+
+- name: "EarnYld — Monitor and Rebalance LP Positions"
+  description: >
+    Every 15 min: read all open LP positions from the EarnYld portfolio,
+    call the scoring API for each one, then branch based on the conditions
+    block. Alerts go to Discord; rebalance/exit actions call the EarnYld
+    portfolio endpoint to record the decision and can optionally call
+    onchain contracts.
+
+  trigger:
+    type: schedule
+    interval: "15m"
+    timezone: "UTC"
+
+  env:
+    AGENT_API_URL:      "{{env.EARNYD_AGENT_URL}}"   # e.g. https://your-agent.example.com
+    DISCORD_WEBHOOK:    "{{env.DISCORD_WEBHOOK_URL}}"
+    TELEGRAM_CHAT_ID:   "{{env.TELEGRAM_CHAT_ID}}"
+    ALERT_SCORE_DROP:   60    # alert when compositeScore drops below this
+    MIN_HOURS_BEFORE_REBALANCE: 24
+
+  steps:
+
+    # ── Step 1: Fetch all open positions ───────────────────────────────────────
+    - id: get_positions
+      type: http
+      label: "Fetch open positions"
+      request:
+        method: GET
+        url: "{{env.AGENT_API_URL}}/keeper/positions"
+      outputs:
+        positions: "{{response.data}}"
+        count:     "{{response.count}}"
+
+    # ── Step 2: Early exit if no open positions ────────────────────────────────
+    - id: check_has_positions
+      type: condition
+      label: "Any open positions?"
+      input: "{{steps.get_positions.count}}"
+      branches:
+        - name: no_positions
+          condition: "{{steps.get_positions.count == 0}}"
+          steps:
+            - id: log_idle
+              type: log
+              message: "No open positions — nothing to monitor"
+          # workflow ends here for this branch
+        - name: has_positions
+          condition: "{{steps.get_positions.count > 0}}"
+          steps: []  # continue to step 3
+
+    # ── Step 3: Score each position via EarnYld signal API ────────────────────
+    # KeeperHub forEach iterates over the positions array and runs steps 3–7
+    # once per position.
+    - id: score_positions
+      type: forEach
+      label: "Score each position"
+      items: "{{steps.get_positions.positions}}"
+      iterationVariable: position
+      steps:
+
+        - id: get_signal
+          type: http
+          label: "Call EarnYld /keeper/signal"
+          request:
+            method: POST
+            url:    "{{env.AGENT_API_URL}}/keeper/signal"
+            headers:
+              Content-Type: "application/json"
+            body:
+              positionId: "{{position.positionId}}"
+              poolId:     "{{position.poolId}}"
+          outputs:
+            signal:     "{{response}}"
+            conditions: "{{response.conditions}}"
+
+        # ── Step 4: Route based on conditions ───────────────────────────────
+        - id: route_signal
+          type: condition
+          label: "Route: exit / rebalance / alert / hold"
+          branches:
+
+            # ── Branch A: Critical exit ──────────────────────────────────────
+            - name: exit_triggered
+              condition: "{{steps.get_signal.conditions.shouldExit == true}}"
+              steps:
+
+                - id: notify_exit
+                  type: notification
+                  channels: [discord, telegram]
+                  message: |
+                    🚨 *EXIT TRIGGERED* — {{position.pair}} ({{position.chainName}})
+                    Reason: {{steps.get_signal.signal.reasoning}}
+                    Score: {{steps.get_signal.signal.compositeScore}}/100
+                    PnL: {{position.pnlPct}}%  |  Value: ${{position.currentValueUsd}}
+                    ExitAlerts: {{position.exitAlerts}}
+                    Action required: remove liquidity from position {{position.positionId}}
+
+                # Optional: call EarnYld to record the exit decision
+                - id: record_exit_intent
+                  type: http
+                  label: "Record exit intent in EarnYld"
+                  request:
+                    method: POST
+                    url:    "{{env.AGENT_API_URL}}/portfolio/close"
+                    headers:
+                      Content-Type: "application/json"
+                    body:
+                      positionId: "{{position.positionId}}"
+                      reason:     "KeeperHub exit trigger: {{steps.get_signal.signal.reasoning}}"
+                  continueOnError: true
+
+                # TODO: add your onchain remove-liquidity contract call here
+                # - id: execute_remove_liquidity
+                #   type: contract_write
+                #   chain: "{{position.chainName}}"
+                #   contract: "YOUR_POSITION_MANAGER_ADDRESS"
+                #   function: "removeLiquidity"
+                #   args: [...]
+
+            # ── Branch B: Rebalance range ────────────────────────────────────
+            - name: rebalance_needed
+              condition: >
+                {{steps.get_signal.conditions.shouldRebalance == true &&
+                  steps.get_signal.conditions.shouldExit == false}}
+              steps:
+
+                - id: notify_rebalance
+                  type: notification
+                  channels: [discord]
+                  message: |
+                    ⚡ *REBALANCE NEEDED* — {{position.pair}} ({{position.chainName}})
+                    Position out of range (TiR {{position.timeInRangePct}}%)
+                    Held {{position.hoursHeld}}h  |  Score {{steps.get_signal.signal.compositeScore}}/100
+                    Suggested: remove liquidity and re-enter with updated tick range.
+
+                # TODO: add your onchain rebalance contract call here
+                # - id: execute_rebalance
+                #   type: contract_write
+                #   ...
+
+            # ── Branch C: Non-critical alert ─────────────────────────────────
+            - name: alert_only
+              condition: >
+                {{steps.get_signal.conditions.shouldAlert == true &&
+                  steps.get_signal.conditions.shouldRebalance == false &&
+                  steps.get_signal.conditions.shouldExit == false}}
+              steps:
+
+                - id: notify_alert
+                  type: notification
+                  channels: [discord]
+                  message: |
+                    ⚠ *ALERT* — {{position.pair}} ({{position.chainName}})
+                    {{steps.get_signal.signal.reasoning}}
+                    Score: {{steps.get_signal.signal.compositeScore}}/100
+                    TiR: {{position.timeInRangePct}}%  |  PnL: {{position.pnlPct}}%
+
+            # ── Branch D: Healthy — hold ─────────────────────────────────────
+            - name: hold
+              condition: >
+                {{steps.get_signal.conditions.shouldAlert == false &&
+                  steps.get_signal.conditions.shouldRebalance == false &&
+                  steps.get_signal.conditions.shouldExit == false}}
+              steps:
+
+                - id: log_healthy
+                  type: log
+                  message: >
+                    ✓ {{position.pair}} healthy —
+                    score {{steps.get_signal.signal.compositeScore}}/100,
+                    TiR {{position.timeInRangePct}}%,
+                    PnL {{position.pnlPct}}%
+
+    # ── Step 5: Summary log ───────────────────────────────────────────────────
+    - id: log_run_complete
+      type: log
+      message: "Monitor run complete — {{steps.get_positions.count}} positions checked"
+
+
+# ── Workflow 2: Discover New Entry Opportunities ──────────────────────────────
+#
+# Runs every hour. Fetches the top-ranked yield pools from EarnYld, calls
+# /keeper/signal for each, and notifies when canEnterNew is true.
+
+- name: "EarnYld — Discover Entry Opportunities"
+  description: >
+    Hourly: fetch top-scored pools from EarnYld, check entry conditions via
+    /keeper/signal, and send a Discord notification when a pool passes all
+    gates (score, hook risk, TVL, volume, allocation budget).
+
+  trigger:
+    type: schedule
+    interval: "1h"
+    timezone: "UTC"
+
+  env:
+    AGENT_API_URL:   "{{env.EARNYD_AGENT_URL}}"
+    DISCORD_WEBHOOK: "{{env.DISCORD_WEBHOOK_URL}}"
+    TOP_N_POOLS:     5
+
+  steps:
+
+    - id: fetch_yields
+      type: http
+      label: "Fetch top-ranked yield pools"
+      request:
+        method: GET
+        url:    "{{env.AGENT_API_URL}}/yields?limit={{env.TOP_N_POOLS}}"
+      outputs:
+        pools: "{{response.data}}"
+
+    - id: check_opportunities
+      type: forEach
+      label: "Check entry conditions for each pool"
+      items: "{{steps.fetch_yields.pools}}"
+      iterationVariable: pool
+      steps:
+
+        - id: pool_signal
+          type: http
+          label: "Get entry signal"
+          request:
+            method: POST
+            url:    "{{env.AGENT_API_URL}}/keeper/signal"
+            headers:
+              Content-Type: "application/json"
+            body:
+              poolId:  "{{pool.poolId}}"
+          outputs:
+            signal:     "{{response}}"
+            conditions: "{{response.conditions}}"
+
+        - id: entry_gate
+          type: condition
+          branches:
+            - name: entry_approved
+              condition: "{{steps.pool_signal.conditions.canEnterNew == true}}"
+              steps:
+                - id: notify_entry
+                  type: notification
+                  channels: [discord]
+                  message: |
+                    🟢 *ENTRY OPPORTUNITY* — {{pool.pair}} ({{pool.chainName}})
+                    Score: {{steps.pool_signal.signal.compositeScore}}/100
+                    effAPY: {{steps.pool_signal.signal.effectiveNetAPY}}%
+                    TVL: ${{pool.tvlUsd}}
+                    Hook: {{pool.hookAnalysis.riskLevel || "none"}}
+                    Reasoning: {{steps.pool_signal.signal.reasoning}}
+                    Action: approve entry via EarnYld dashboard or execute via position manager.
+
+            - name: entry_blocked
+              condition: "{{steps.pool_signal.conditions.canEnterNew == false}}"
+              steps:
+                - id: log_blocked
+                  type: log
+                  message: >
+                    ✗ {{pool.pair}} blocked — {{steps.pool_signal.signal.reasoning}}
+
+
+# ── Workflow 3: Hook Risk Change Alert ────────────────────────────────────────
+#
+# Triggered by EarnYld posting a webhook when hook analysis results change.
+# Use this if you want real-time hook risk notifications rather than polling.
+
+- name: "EarnYld — Hook Risk Change Alert"
+  description: >
+    Triggered by webhook from the EarnYld agent whenever a hooked pool's
+    risk level changes (e.g. from medium → high, or source verification
+    status changes).  Immediately notifies and optionally queues an exit
+    for any position in that pool.
+
+  trigger:
+    type: webhook
+    # Configure EarnYld to POST to this KeeperHub webhook URL when
+    # hook risk changes (add a call to your /keeper/hook-risk-alert
+    # endpoint from ReporterAgent.ts enrichHookAnalysis()).
+
+  steps:
+
+    - id: parse_hook_event
+      type: log
+      message: "Hook risk event received: {{trigger.body.poolId}} → {{trigger.body.riskLevel}}"
+
+    - id: check_severity
+      type: condition
+      branches:
+        - name: critical_hook
+          condition: "{{trigger.body.riskLevel == 'critical' || trigger.body.isBlocked == true}}"
+          steps:
+            - id: critical_hook_alert
+              type: notification
+              channels: [discord, telegram]
+              message: |
+                🚫 *HOOK BLOCKED* — {{trigger.body.pair}} ({{trigger.body.chainName}})
+                Pool: {{trigger.body.poolId}}
+                Hook: {{trigger.body.hookAddress}}
+                Risk score: {{trigger.body.riskScore}}/100
+                Source verified: {{trigger.body.sourceVerified}}
+                ACTION REQUIRED: exit any positions in this pool immediately.
+
+        - name: high_hook
+          condition: "{{trigger.body.riskLevel == 'high'}}"
+          steps:
+            - id: high_hook_alert
+              type: notification
+              channels: [discord]
+              message: |
+                ⚡ *Hook risk elevated* — {{trigger.body.pair}} ({{trigger.body.chainName}})
+                Risk level: HIGH (score {{trigger.body.riskScore}}/100)
+                Monitor closely; consider reducing allocation.
+
+        - name: resolved
+          condition: "{{trigger.body.riskLevel == 'low' || trigger.body.riskLevel == 'medium'}}"
+          steps:
+            - id: resolution_log
+              type: log
+              message: >
+                Hook risk resolved for {{trigger.body.pair}}: {{trigger.body.riskLevel}}

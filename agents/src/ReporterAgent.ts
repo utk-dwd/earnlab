@@ -14,6 +14,7 @@ import { computeCapitalEfficiency } from "./calculator/CapitalEfficiencyCalculat
 import { detectAdverseSelection } from "./calculator/AdverseSelectionDetector";
 import { runStressTest } from "./calculator/ScenarioStressTester";
 import { computeScorecard } from "./calculator/DecisionScorecard";
+import { analyzeHook } from "./calculator/HookAnalyzer";
 import { APYHistoryStore } from "./storage/APYHistoryStore";
 import { ExecutionHistory } from "./storage/ExecutionHistory";
 import { SnapshotStore } from "./storage/SnapshotStore";
@@ -91,15 +92,16 @@ export class ReporterAgent {
     // Prune old history rows every 100 scans (~100 min at default interval)
     if (++this.scanCount % 100 === 0) this.apyHistory.prune();
 
-    // Compute RAR, then token risk + stablecoin risk in parallel — all in background
+    // Compute RAR, then token risk + stablecoin risk + hook analysis in parallel — all in background
     this.enrichRAR(ranked)
       .then(() => Promise.all([
         this.enrichTokenRisk(ranked),
         this.enrichStablecoinRisk(ranked),
+        this.enrichHookAnalysis(ranked),
       ]))
       .then(() => {
         this.persistLatest();
-        console.log(`[Reporter] RAR + token risk + stable risk enriched for ${ranked.length} pools`);
+        console.log(`[Reporter] RAR + token risk + stable risk + hook analysis enriched for ${ranked.length} pools`);
       })
       .catch((err) => {
         console.error(`[Reporter] Enrichment pipeline failed: ${errorMessage(err)}`);
@@ -170,6 +172,8 @@ export class ReporterAgent {
           scorecard:            prev?.scorecard            ?? null,
           hookFlags:            p.hookFlags      ?? [],
           hasCustomHooks:       p.hasCustomHooks ?? false,
+          hookAddress:          p.poolKey.hooks  ?? "0x0000000000000000000000000000000000000000",
+          hookAnalysis:         prev?.hookAnalysis ?? null,
           enrichmentDegraded:   false,
           enrichmentErrors:     [],
           lastUpdated:  p.lastUpdated,
@@ -394,6 +398,40 @@ export class ReporterAgent {
           }
         } catch (err) {
           markEnrichmentFailed("stablecoinRisk", opp, err);
+        }
+      }))
+    );
+  }
+
+  // ─── Hook analysis enrichment ────────────────────────────────────────────
+  // Runs in parallel with token/stable risk enrichment. Calls Sourcify for
+  // source verification (cached 24h) and classifies fee type, incentive model,
+  // and smart-contract risk for each hooked pool.
+  private async enrichHookAnalysis(ranked: RankedOpportunity[]): Promise<void> {
+    const ZERO = "0x0000000000000000000000000000000000000000";
+    const limit = pLimit(ENRICH_CONCURRENCY);
+    await Promise.allSettled(
+      ranked.map((opp) => limit(async () => {
+        if (!opp.hookAddress || opp.hookAddress === ZERO) {
+          opp.hookAnalysis = null;
+          return;
+        }
+        try {
+          opp.hookAnalysis = await analyzeHook(
+            opp.hookAddress,
+            opp.chainId,
+            opp.tvlUsd,
+            30, // conservative default pool age (no creation block tracking yet)
+          );
+          if (opp.hookAnalysis.isBlocked) {
+            console.log(`[Reporter] Hook BLOCK: ${opp.pair} on ${opp.chainName} hook=${opp.hookAddress} riskScore=${opp.hookAnalysis.riskScore}`);
+          } else if (opp.hookAnalysis.riskLevel !== "low") {
+            console.log(`[Reporter] Hook advisory: ${opp.pair} riskLevel=${opp.hookAnalysis.riskLevel} score=${opp.hookAnalysis.riskScore} callbacks=${opp.hookAnalysis.callbacks.join(",")}`);
+          }
+          // Refresh scorecard with hook data now available
+          if (opp.scorecard) opp.scorecard = computeScorecard(opp);
+        } catch (err) {
+          markEnrichmentFailed("hookAnalysis", opp, err);
         }
       }))
     );

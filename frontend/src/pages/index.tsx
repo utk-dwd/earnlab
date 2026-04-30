@@ -9,8 +9,10 @@ import { DecisionFeed }         from "../components/DecisionFeed";
 import { PendingActionsPanel }  from "../components/PendingActionsPanel";
 import { WalletButton }         from "../components/WalletButton";
 import { TransferModal }        from "../components/TransferModal";
+import { SwapModal }            from "../components/SwapModal";
 import { AppWalletBalances }    from "../components/AppWalletBalances";
 import { LLMSelector }         from "../components/LLMSelector";
+import { AgentINFTPanel }      from "../components/AgentINFTPanel";
 import type {
   RankedOpportunity, PortfolioSummary, MockPosition,
   MacroRegime, RiskBudgetState, PendingAction,
@@ -62,7 +64,9 @@ export default function Dashboard() {
   const [autonomousMode, setAutonomousMode] = useState<boolean>(true);
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
   const [showTransfer,   setShowTransfer]   = useState(false);
+  const [showSwap,       setShowSwap]       = useState(false);
   const [showLLM,        setShowLLM]        = useState(false);
+  const [showINFT,       setShowINFT]       = useState(false);
   const prevPendingCount = useRef(0);
 
   async function fetchData() {
@@ -143,8 +147,10 @@ export default function Dashboard() {
       <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 flex flex-col">
 
         {/* Modals — rendered at root so they overlay everything */}
-        {showTransfer && <TransferModal onClose={() => setShowTransfer(false)} />}
-        {showLLM      && <LLMSelector  onClose={() => setShowLLM(false)} />}
+        {showTransfer && <TransferModal  onClose={() => setShowTransfer(false)} />}
+        {showSwap     && <SwapModal      onClose={() => setShowSwap(false)} yields={yields} />}
+        {showLLM      && <LLMSelector    onClose={() => setShowLLM(false)} />}
+        {showINFT     && <AgentINFTPanel onClose={() => setShowINFT(false)} />}
 
         {/* ── Header ── */}
         <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex-shrink-0">
@@ -201,6 +207,18 @@ export default function Dashboard() {
                 className="px-3 py-1.5 rounded-lg border border-purple-400 dark:border-purple-500 text-purple-700 dark:text-purple-300 text-sm font-semibold hover:bg-purple-50 dark:hover:bg-purple-900/30 transition-colors"
               >
                 🤖 Choose LLM
+              </button>
+              <button
+                onClick={() => setShowSwap(true)}
+                className="px-3 py-1.5 rounded-lg border border-emerald-400 dark:border-emerald-500 text-emerald-700 dark:text-emerald-300 text-sm font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition-colors"
+              >
+                🔄 Swap
+              </button>
+              <button
+                onClick={() => setShowINFT(true)}
+                className="px-3 py-1.5 rounded-lg border border-violet-400 dark:border-violet-500 text-violet-700 dark:text-violet-300 text-sm font-semibold hover:bg-violet-50 dark:hover:bg-violet-900/30 transition-colors"
+              >
+                🤖 Agents
               </button>
               <button
                 onClick={() => setShowTransfer(true)}

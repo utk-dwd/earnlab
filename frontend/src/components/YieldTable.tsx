@@ -2,7 +2,7 @@
 
 import { useState, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { RankedOpportunity, PoolRiskResult, StablecoinRiskResult, AdverseSelectionResult, StressTestResult, DecisionScorecard } from "../types/api";
+import type { RankedOpportunity, PoolRiskResult, StablecoinRiskResult, AdverseSelectionResult, StressTestResult, DecisionScorecard, HookAnalysisResult } from "../types/api";
 
 interface Props {
   opportunities: RankedOpportunity[];
@@ -218,26 +218,30 @@ Color: green <0 (all profitable) · yellow 0–30
        orange 30–60 · red ≥ 60`;
 
 const SCORECARD_TOOLTIP = `Decision Scorecard (0–100 per dimension)
-Composite = weighted sum of 8 dimensions.
+Composite = weighted sum of 9 dimensions.
 Higher = better on every dimension.
 
-  Yield      25%  effectiveNetAPY potential
-                  (adverse-selection adjusted)
-  IL         20%  protection from impermanent loss
+Neutral weights shown below:
+  Yield      22%  effectiveNetAPY × hook multiplier
+                  × incentive haircut (adv-sel adj)
+  IL         18%  protection from impermanent loss
                   0% IL eats = 100; IL ≥ APY = 0
-  Liquidity  15%  pool depth, activity, APY stability
+  Liquidity  13%  pool depth, activity, APY stability
                   (= liquidityQuality score)
-  Volatility 10%  time-in-range + price move penalty
-  Token Risk 10%  inverse GoPlus score
+  Volatility  9%  time-in-range + price move penalty
+  Token Risk  9%  inverse GoPlus score
                   0 = BLOCKED; 100 = fully clean
-  Gas         5%  break-even speed
+  Gas         4%  break-even speed
                   7-day BE → 0; same-block BE → 100
-  Correlation 10% portfolio diversification benefit
+  Correlation 9%  portfolio diversification benefit
                   new tokens + chain → 100
                   full overlap → 20
-  Regime      5%  macro fit
+  Regime      4%  macro fit
                   risk-off+stable → 90
                   risk-on+volatile → 90
+  Hook Risk  12%  100 − hook riskScore
+                  100 = vanilla or low-risk hook
+                  0   = critical/blocked hook
 
 Composite 80–100  exceptional across all dimensions
 Composite 60–79   solid — enter with confidence
@@ -267,27 +271,33 @@ Computed from the same hourly DefiLlama
 data used for volatility.
 "—" = no data yet.`;
 
-const HOOKS_TOOLTIP = `Uniswap v4 Hook Flags
-Decoded from the pool's hooks contract address
-using @uniswap/v4-sdk hookFlagIndex.
+const HOOKS_TOOLTIP = `Uniswap v4 Hook Risk
+Decoded from the pool's hooks contract address.
+Risk score accumulation (0–100):
+  beforeRemoveLiquidity  +30  can trap capital
+  beforeAddLiquidity     +15  can restrict entry
+  beforeSwap             +10  dynamic fees
+  6+ callbacks           +15  high attack surface
+  Source unverified      +25  (Sourcify check)
+  TVL > $500K unverified +10
+  Pool age < 7 days      +15
 
-⚫ = vanilla pool — no custom logic
-🔵 = hooked pool — one or more v4 callbacks active
+Risk levels:
+  ✓ low      score < 25   APY ×1.10
+  ⚠ medium   score < 50   APY ×0.95
+  ⚡ high     score < 85   APY ×0.85
+  🚫 critical score ≥ 85   blocked
 
-Active hook callbacks are shown in the tooltip.
-The 14 possible hook points:
-  beforeInitialize / afterInitialize
-  beforeAddLiquidity / afterAddLiquidity
-  beforeRemoveLiquidity / afterRemoveLiquidity
-  beforeSwap / afterSwap
-  beforeDonate / afterDonate
-  beforeSwapReturnsDelta / afterSwapReturnsDelta
-  beforeAddLiquidityReturnsDelta
-  afterRemoveLiquidityReturnsDelta
+Fee types:
+  static          — fixed fee tier
+  dynamic-unknown — beforeSwap modifies fees
 
-Hooked pools can implement dynamic fees, MEV
-protection, custom oracles, or concentrated
-liquidity with custom curves.`;
+Incentive haircuts on APY:
+  real-fees           ×1.00
+  hook-native-rewards ×0.60
+  points-airdrop      ×0.10
+
+Rebalance: none / auto-compound / range-rebalance`;
 
 const TOKEN_RISK_TOOLTIP = `Token Risk Score (0–100)
 Powered by GoPlus Security API (free).
@@ -587,7 +597,7 @@ export function YieldTable({ opportunities, isLoading }: Props) {
                 <td className="px-3 py-2.5"><AdvSelBadge adv={o.adverseSelection} /></td>
                 <td className="px-3 py-2.5"><StressBadge stress={o.stressTest} /></td>
                 <td className="px-3 py-2.5"><ScorecardBadge scorecard={o.scorecard} /></td>
-                <td className="px-3 py-2.5"><HooksBadge hookFlags={o.hookFlags ?? []} hasCustom={o.hasCustomHooks ?? false} /></td>
+                <td className="px-3 py-2.5"><HooksBadge hookFlags={o.hookFlags ?? []} hasCustom={o.hasCustomHooks ?? false} hookAnalysis={o.hookAnalysis ?? null} /></td>
                 <td className="px-3 py-2.5"><RiskBadge risk={o.risk} /></td>
 
                 {/* RAR 24h */}
@@ -627,8 +637,8 @@ export function YieldTable({ opportunities, isLoading }: Props) {
         <span><strong>S.Risk</strong> = stablecoin risk 0–100 (peg, imbalance, issuer, bridge, chain, depeg vol) &nbsp;·&nbsp; only for stable pools</span>
         <span><strong>Adv.Sel</strong> = adverse selection 0–100 &nbsp;·&nbsp; elevated/high = fees earned from informed directional traders, not balanced flow</span>
         <span><strong>Stress</strong> = downside score 0–100 over 8 adversarial 30-day scenarios &nbsp;·&nbsp; 0 = all profitable, 100 = worst case ≥ −20% loss &nbsp;·&nbsp; ES = avg of 3 worst</span>
-        <span><strong>Score</strong> = composite decision scorecard 0–100 (weighted: yield 25%, IL 20%, LQ 15%, vol 10%, token 10%, gas 5%, corr 10%, regime 5%) &nbsp;·&nbsp; hover for breakdown</span>
-        <span><strong>Hooks</strong> = Uniswap v4 hook callbacks decoded from hooks address via <code>@uniswap/v4-sdk</code> &nbsp;·&nbsp; ⚫ vanilla &nbsp;·&nbsp; 🔵 N = N active callbacks</span>
+        <span><strong>Score</strong> = composite decision scorecard 0–100 (9 dimensions incl. hookRisk; neutral: yield 22%, IL 18%, LQ 13%, vol 9%, token 9%, gas 4%, corr 9%, regime 4%, hook 12%) &nbsp;·&nbsp; hover for breakdown</span>
+        <span><strong>Hooks</strong> = v4 hook risk (Sourcify verified + callback risk score) &nbsp;·&nbsp; ⚫ vanilla &nbsp;·&nbsp; ✓ low · ⚠ medium · ⚡ high · 🚫 blocked</span>
         <span className="flex gap-2">
           {([["excellent","≥2.0","text-emerald-600"],["good","≥1.0","text-green-500"],["fair","≥0.5","text-yellow-500"],["poor","<0.5","text-red-500"]] as const).map(([q,v,c])=>(
             <span key={q}><span className={`font-semibold ${c}`}>{q}</span> {v}</span>
@@ -914,16 +924,16 @@ function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | u
   if (scorecard == null) {
     return <span className="text-gray-300 dark:text-gray-600 text-xs">…</span>;
   }
-  const { composite, yield: y, il, liquidity, volatility, tokenRisk, gas, correlation, regime, allocationPct, weightSet, labels } = scorecard;
+  const { composite, yield: y, il, liquidity, volatility, tokenRisk, gas, correlation, regime, hookRisk, allocationPct, weightSet, labels } = scorecard;
   const color = composite >= 80 ? "text-emerald-600 dark:text-emerald-400"
     : composite >= 60            ? "text-green-500 dark:text-green-400"
     : composite >= 40            ? "text-yellow-500 dark:text-yellow-400"
     : "text-red-500 dark:text-red-400";
 
   const REGIME_WEIGHTS: Record<string, Record<string, number>> = {
-    "risk-off": { Yield: 0.10, IL: 0.30, Liquidity: 0.15, Volatility: 0.15, "Token Risk": 0.15, Gas: 0.05, Correlation: 0.07, Regime: 0.03 },
-    "neutral":  { Yield: 0.25, IL: 0.20, Liquidity: 0.15, Volatility: 0.10, "Token Risk": 0.10, Gas: 0.05, Correlation: 0.10, Regime: 0.05 },
-    "risk-on":  { Yield: 0.35, IL: 0.10, Liquidity: 0.15, Volatility: 0.08, "Token Risk": 0.08, Gas: 0.04, Correlation: 0.12, Regime: 0.08 },
+    "risk-off": { Yield: 0.09, IL: 0.28, Liquidity: 0.14, Volatility: 0.14, "Token Risk": 0.14, Gas: 0.04, Correlation: 0.06, Regime: 0.03, "Hook Risk": 0.08 },
+    "neutral":  { Yield: 0.22, IL: 0.18, Liquidity: 0.13, Volatility: 0.09, "Token Risk": 0.09, Gas: 0.04, Correlation: 0.09, Regime: 0.04, "Hook Risk": 0.12 },
+    "risk-on":  { Yield: 0.32, IL: 0.09, Liquidity: 0.13, Volatility: 0.07, "Token Risk": 0.07, Gas: 0.04, Correlation: 0.11, Regime: 0.07, "Hook Risk": 0.10 },
   };
   const activeW = REGIME_WEIGHTS[weightSet ?? "neutral"];
   const wLabel  = weightSet === "risk-off" ? "🔴 risk-off weights" : weightSet === "risk-on" ? "🟢 risk-on weights" : "⚪ neutral weights";
@@ -943,6 +953,7 @@ function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | u
     dim("Gas",         gas,         labels.gas),
     dim("Correlation", correlation, labels.correlation),
     dim("Regime",      regime,      labels.regime),
+    dim("Hook Risk",   hookRisk ?? 100, labels.hookRisk ?? "no hook"),
   ].join("\n");
   return (
     <Tooltip text={tip}>
@@ -953,21 +964,50 @@ function ScorecardBadge({ scorecard }: { scorecard: DecisionScorecard | null | u
   );
 }
 
-function HooksBadge({ hookFlags, hasCustom }: { hookFlags: string[]; hasCustom: boolean }) {
+function HooksBadge({ hookFlags, hasCustom, hookAnalysis }: {
+  hookFlags:    string[];
+  hasCustom:    boolean;
+  hookAnalysis: HookAnalysisResult | null;
+}) {
   if (!hasCustom || hookFlags.length === 0) {
     return <span className="text-gray-300 dark:text-gray-600 text-xs" title="Vanilla pool — no custom hooks">⚫</span>;
   }
+
+  // While hookAnalysis is still loading, fall back to simple blue dot
+  if (!hookAnalysis) {
+    const tip = [
+      `Uniswap v4 Hooked Pool (analysing…)`,
+      `${hookFlags.length} active callback${hookFlags.length > 1 ? "s" : ""}:`,
+      ...hookFlags.map(f => `  • ${f}`),
+    ].join("\n");
+    return (
+      <Tooltip text={tip}>
+        <span className="text-blue-500 dark:text-blue-400 text-xs cursor-help">🔵 {hookFlags.length}</span>
+      </Tooltip>
+    );
+  }
+
+  const { riskLevel, riskScore, feeType, rebalanceType, sourceVerified, isBlocked, callbacks } = hookAnalysis;
+
+  const [icon, colorClass] =
+    isBlocked           ? ["🚫", "text-red-500 dark:text-red-400"]
+    : riskLevel === "high"   ? ["⚡", "text-orange-500 dark:text-orange-400"]
+    : riskLevel === "medium" ? ["⚠", "text-yellow-500 dark:text-yellow-400"]
+    : ["✓", "text-emerald-600 dark:text-emerald-400"];
+
   const tip = [
-    `Uniswap v4 Hooked Pool`,
-    `${hookFlags.length} active callback${hookFlags.length > 1 ? "s" : ""}:`,
-    ...hookFlags.map(f => `  • ${f}`),
-    ``,
-    `Decoded via @uniswap/v4-sdk hookFlagIndex`,
-  ].join("\n");
+    `Hook Risk: ${riskScore}/100 (${riskLevel})${isBlocked ? " — BLOCKED" : ""}`,
+    `Fee type:    ${feeType}`,
+    `Rebalance:   ${rebalanceType}`,
+    `Source:      ${sourceVerified ? "verified ✓" : "unverified ✗"}`,
+    callbacks.length ? `Callbacks (${callbacks.length}):` : "",
+    ...callbacks.map(f => `  • ${f}`),
+  ].filter(Boolean).join("\n");
+
   return (
     <Tooltip text={tip}>
-      <span className="text-blue-500 dark:text-blue-400 text-xs cursor-help" title="">
-        🔵 {hookFlags.length}
+      <span className={`font-mono text-xs cursor-help ${colorClass}`}>
+        {icon} {callbacks.length}
       </span>
     </Tooltip>
   );
