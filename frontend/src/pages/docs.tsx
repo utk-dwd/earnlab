@@ -13,7 +13,9 @@ export default function DocsPage() {
   return (
     <>
       <Head>
-        <title>EarnGen API Docs</title>
+        <title>EarnYld - API Docs</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="shortcut icon" href="/favicon.svg" />
       </Head>
       <div className="min-h-screen bg-white dark:bg-gray-950">
         {/* Header */}

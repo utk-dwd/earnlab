@@ -1,14 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Head from "next/head";
-import { YieldTable }         from "../components/YieldTable";
-import { PositionsTable }     from "../components/PositionsTable";
-import { ReflectionSidebar }  from "../components/ReflectionSidebar";
-import { DecisionFeed }       from "../components/DecisionFeed";
+import { YieldTable }           from "../components/YieldTable";
+import { PositionsTable }       from "../components/PositionsTable";
+import { ReflectionSidebar }    from "../components/ReflectionSidebar";
+import { DecisionFeed }         from "../components/DecisionFeed";
+import { PendingActionsPanel }  from "../components/PendingActionsPanel";
+import { WalletButton }         from "../components/WalletButton";
+import { TransferModal }        from "../components/TransferModal";
+import { AppWalletBalances }    from "../components/AppWalletBalances";
+import { LLMSelector }         from "../components/LLMSelector";
 import type {
   RankedOpportunity, PortfolioSummary, MockPosition,
-  MacroRegime, RiskBudgetState,
+  MacroRegime, RiskBudgetState, PendingAction,
 } from "../types/api";
 
 const API = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:3001";
@@ -16,34 +21,99 @@ const API = process.env.NEXT_PUBLIC_AGENT_API_URL ?? "http://localhost:3001";
 type Tab       = "yields" | "positions";
 type SidePanel = "decisions" | "reflections";
 
+function playPendingActionAlert() {
+  try {
+    const AudioCtx = window.AudioContext ?? (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+
+    const tone = (freq: number, start: number, dur: number) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, start);
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.25, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+      osc.start(start);
+      osc.stop(start + dur);
+    };
+
+    const t = ctx.currentTime;
+    tone(660,  t,        0.12);   // E5  — first note
+    tone(880,  t + 0.13, 0.12);   // A5  — second note (ascending)
+    tone(1320, t + 0.26, 0.22);   // E6  — resolve up
+  } catch {
+    // AudioContext blocked (e.g. no user gesture yet) — silently ignore
+  }
+}
+
 export default function Dashboard() {
-  const [tab,       setTab]       = useState<Tab>("yields");
-  const [sidePanel, setSidePanel] = useState<SidePanel>("decisions");
-  const [yields,    setYields]    = useState<RankedOpportunity[]>([]);
-  const [positions, setPositions] = useState<MockPosition[]>([]);
-  const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
-  const [loading,   setLoading]   = useState(true);
-  const [lastScan,  setLastScan]  = useState<string>("");
-  const [error,     setError]     = useState<string>("");
+  const [tab,            setTab]           = useState<Tab>("yields");
+  const [sidePanel,      setSidePanel]     = useState<SidePanel>("decisions");
+  const [yields,         setYields]        = useState<RankedOpportunity[]>([]);
+  const [positions,      setPositions]     = useState<MockPosition[]>([]);
+  const [portfolio,      setPortfolio]     = useState<PortfolioSummary | null>(null);
+  const [loading,        setLoading]       = useState(true);
+  const [lastScan,       setLastScan]      = useState<string>("");
+  const [error,          setError]         = useState<string>("");
+  const [autonomousMode, setAutonomousMode] = useState<boolean>(true);
+  const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
+  const [showTransfer,   setShowTransfer]   = useState(false);
+  const [showLLM,        setShowLLM]        = useState(false);
+  const prevPendingCount = useRef(0);
 
   async function fetchData() {
     setLoading(true);
     setError("");
     try {
-      const [yRes, pRes, posRes] = await Promise.all([
+      const [yRes, pRes, posRes, settingsRes, pendingRes] = await Promise.all([
         fetch(`${API}/yields?limit=100`),
         fetch(`${API}/portfolio`),
         fetch(`${API}/portfolio/positions`),
+        fetch(`${API}/settings`),
+        fetch(`${API}/pending-actions`),
       ]);
       if (!yRes.ok) throw new Error(`Agent API returned ${yRes.status}`);
       setYields((await yRes.json()).data ?? []);
-      if (pRes.ok)   setPortfolio(await pRes.json());
-      if (posRes.ok) setPositions((await posRes.json()).data ?? []);
+      if (pRes.ok)       setPortfolio(await pRes.json());
+      if (posRes.ok)     setPositions((await posRes.json()).data ?? []);
+      if (settingsRes.ok) {
+        const s = await settingsRes.json();
+        setAutonomousMode(s.autonomousMode ?? true);
+      }
+      if (pendingRes.ok) setPendingActions((await pendingRes.json()).data ?? []);
       setLastScan(new Date().toLocaleTimeString());
     } catch (e: any) {
       setError(e.message ?? "Failed to reach agent API");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchPendingActions() {
+    try {
+      const res = await fetch(`${API}/pending-actions`);
+      if (res.ok) setPendingActions((await res.json()).data ?? []);
+    } catch {}
+  }
+
+  async function toggleMode() {
+    const next = !autonomousMode;
+    setAutonomousMode(next);           // optimistic — UI responds immediately
+    try {
+      const res = await fetch(`${API}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autonomousMode: next }),
+      });
+      // Only revert if the server explicitly rejects the value (400).
+      // 404 means the backend hasn't restarted yet — keep local state.
+      if (res.status === 400) setAutonomousMode(!next);
+    } catch {
+      // Network error — keep local state, will sync on next backend restart.
     }
   }
 
@@ -53,10 +123,28 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []);
 
+  // Play a chime whenever new pending actions arrive
+  useEffect(() => {
+    const count = pendingActions.filter(a => a.status === "pending" && a.action !== "hold" && a.action !== "wait").length;
+    if (count > prevPendingCount.current) {
+      playPendingActionAlert();
+    }
+    prevPendingCount.current = count;
+  }, [pendingActions]);
+
   return (
     <>
-      <Head><title>EarnYld — Yield Hunter</title></Head>
+      <Head>
+        <title>EarnYld - Risk Adjusted Yield Hunter</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="shortcut icon" href="/favicon.svg" />
+        <meta name="description" content="EarnYld — AI-driven risk-adjusted yield hunting across Uniswap v4 on 18 chains" />
+      </Head>
       <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 flex flex-col">
+
+        {/* Modals — rendered at root so they overlay everything */}
+        {showTransfer && <TransferModal onClose={() => setShowTransfer(false)} />}
+        {showLLM      && <LLMSelector  onClose={() => setShowLLM(false)} />}
 
         {/* ── Header ── */}
         <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex-shrink-0">
@@ -67,8 +155,38 @@ export default function Dashboard() {
                 Uniswap v4 · 18 chains · AI-driven portfolio
               </p>
             </div>
-            <div className="flex items-center gap-4 text-sm">
-              {lastScan && <span className="text-gray-400">Updated {lastScan}</span>}
+            <div className="flex items-center gap-4 text-sm flex-wrap justify-end">
+              {lastScan && <span className="text-gray-400 hidden sm:inline">Updated {lastScan}</span>}
+
+              {/* Autonomous / HITL toggle */}
+              <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+                <button
+                  onClick={() => { if (!autonomousMode) toggleMode(); }}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+                    autonomousMode
+                      ? "bg-white dark:bg-gray-700 text-indigo-700 dark:text-indigo-300 shadow-sm"
+                      : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                  }`}
+                >
+                  Autonomous
+                </button>
+                <button
+                  onClick={() => { if (autonomousMode) toggleMode(); }}
+                  className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+                    !autonomousMode
+                      ? "bg-white dark:bg-gray-700 text-amber-700 dark:text-amber-300 shadow-sm"
+                      : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                  }`}
+                >
+                  Human-in-Loop
+                  {pendingActions.filter(a => a.status === "pending" && a.action !== "hold" && a.action !== "wait").length > 0 && (
+                    <span className="ml-1.5 bg-amber-500 text-white text-xs rounded-full px-1.5 py-0.5 font-bold">
+                      {pendingActions.filter(a => a.status === "pending" && a.action !== "hold" && a.action !== "wait").length}
+                    </span>
+                  )}
+                </button>
+              </div>
+
               <button onClick={fetchData} disabled={loading}
                 className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors">
                 {loading ? "Scanning…" : "Refresh"}
@@ -77,6 +195,21 @@ export default function Dashboard() {
                 className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
                 API Docs
               </a>
+
+              <button
+                onClick={() => setShowLLM(true)}
+                className="px-3 py-1.5 rounded-lg border border-purple-400 dark:border-purple-500 text-purple-700 dark:text-purple-300 text-sm font-semibold hover:bg-purple-50 dark:hover:bg-purple-900/30 transition-colors"
+              >
+                🤖 Choose LLM
+              </button>
+              <button
+                onClick={() => setShowTransfer(true)}
+                className="px-3 py-1.5 rounded-lg border border-indigo-400 dark:border-indigo-500 text-indigo-700 dark:text-indigo-300 text-sm font-semibold hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+              >
+                💸 Transfer
+              </button>
+
+              <WalletButton />
             </div>
           </div>
         </header>
@@ -92,6 +225,9 @@ export default function Dashboard() {
                 ⚠ {error} — is the agent running on port 3001?
               </div>
             )}
+
+            {/* App wallet balances */}
+            <AppWalletBalances />
 
             {/* Stats bar */}
             {portfolio && (
@@ -118,6 +254,15 @@ export default function Dashboard() {
 
             {/* Regime banner */}
             {portfolio && <RegimeBanner regime={portfolio.regime} />}
+
+            {/* Pending actions panel (HITL mode only) */}
+            {!autonomousMode && (
+              <PendingActionsPanel
+                actions={pendingActions}
+                apiUrl={API}
+                onUpdate={fetchPendingActions}
+              />
+            )}
 
             {/* Tabs */}
             <div className="border-b border-gray-200 dark:border-gray-700">
@@ -331,11 +476,16 @@ const ACTION_COLORS: Record<string, string> = {
 };
 
 function LastDecisionBadge({ portfolio }: { portfolio: PortfolioSummary }) {
-  const d   = portfolio.lastDecision;
-  const at  = portfolio.lastDecisionAt;
-  const pct = d ? Math.round(d.confidence * 100) : null;
+  const d      = portfolio.lastDecision;
+  const at     = portfolio.lastDecisionAt;
+  const pct    = d ? Math.round(d.confidence * 100) : null;
+  const vetoed = !!(d?.critique?.veto && (d.critique.confidence ?? 0) >= 0.75);
   return (
-    <div className="rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 px-4 py-3 col-span-2 sm:col-span-1">
+    <div className={`rounded-xl border px-4 py-3 col-span-2 sm:col-span-1 ${
+      vetoed
+        ? "bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800"
+        : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700"
+    }`}>
       <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
         {portfolio.llmEnabled ? "Last Decision" : "Mode"}
       </p>
@@ -345,14 +495,24 @@ function LastDecisionBadge({ portfolio }: { portfolio: PortfolioSummary }) {
         <p className="text-sm text-gray-400 italic">pending…</p>
       ) : (
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-sm font-bold uppercase ${ACTION_COLORS[d.action] ?? ""}`}>{d.action}</span>
             {pct !== null && (
               <span className={`text-xs font-medium ${pct >= 75 ? "text-green-600 dark:text-green-400" : "text-amber-500"}`}>
                 {pct}%
               </span>
             )}
+            {vetoed && (
+              <span className="text-xs font-semibold text-red-600 dark:text-red-400">
+                ✗ critic vetoed
+              </span>
+            )}
           </div>
+          {vetoed && d.critique?.reasoning && (
+            <p className="text-xs text-red-500 dark:text-red-400 mt-0.5 leading-snug">
+              {d.critique.reasoning}
+            </p>
+          )}
           {at && (
             <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
               {new Date(at).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" })}

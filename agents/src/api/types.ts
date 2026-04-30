@@ -1,6 +1,45 @@
 // Shared API contract types. Keep this file free of runtime imports so the
 // frontend can import these types without pulling agent code into the bundle.
 
+export interface CritiqueResult {
+  veto:       boolean;
+  confidence: number;
+  reasoning:  string;
+}
+
+export interface PendingActionSnapshot {
+  displayAPY:      number;
+  rar7d:           number;
+  netAPY:          number;
+  effectiveNetAPY: number;
+}
+
+export interface PendingAction {
+  id:                   string;
+  action:               "enter" | "exit" | "rebalance" | "hold" | "wait";
+  pool?:                string;
+  closePool?:           string;
+  pair?:                string;
+  closePair?:           string;
+  chainName?:           string;
+  allocationPct?:       number;
+  confidence:           number;
+  reasoning:            string;
+  exitCondition?:       string;
+  critique?:            CritiqueResult;
+  /** True while the critic is still running — clears once the verdict arrives or fails. */
+  awaitingCritique?:    boolean;
+  opportunitySnapshot?: PendingActionSnapshot;
+  queuedAt:             number;
+  expiresAt:            number;
+  status:               "pending" | "approved" | "rejected" | "stale" | "executed";
+  staleReason?:         string;
+}
+
+export interface AgentSettings {
+  autonomousMode: boolean;
+}
+
 export interface TokenRiskResult {
   symbol:     string;
   riskScore:  number;

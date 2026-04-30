@@ -7,6 +7,7 @@ import type { ReporterAgent }    from "../ReporterAgent";
 import type { PortfolioManager } from "../PortfolioManager";
 import type { ReflectionAgent }  from "../llm/ReflectionAgent";
 import { SlippageGuard } from "../calculator/SlippageGuard";
+import { getModel, setModel, AVAILABLE_MODELS } from "../llm/LLMConfig";
 
 export function createApiServer(
   agent:      ReporterAgent,
@@ -175,6 +176,60 @@ export function createApiServer(
     res.json({ data: portfolio.getDecisionHistory(limit) });
   });
 
+  // ── GET /settings ─────────────────────────────────────────────────────────────
+  app.get("/settings", (_req: Request, res: Response) => {
+    res.json({ autonomousMode: portfolio.isAutonomousMode() });
+  });
+
+  // ── POST /settings ────────────────────────────────────────────────────────────
+  app.post("/settings", (req: Request, res: Response) => {
+    const { autonomousMode } = req.body;
+    if (typeof autonomousMode !== "boolean") {
+      return res.status(400).json({ error: "autonomousMode must be a boolean" });
+    }
+    portfolio.setAutonomousMode(autonomousMode);
+    res.json({ autonomousMode: portfolio.isAutonomousMode() });
+  });
+
+  // ── GET /settings/llm ─────────────────────────────────────────────────────────
+  app.get("/settings/llm", (_req: Request, res: Response) => {
+    res.json({ model: getModel(), availableModels: AVAILABLE_MODELS });
+  });
+
+  // ── POST /settings/llm ────────────────────────────────────────────────────────
+  app.post("/settings/llm", (req: Request, res: Response) => {
+    const { model } = req.body;
+    if (typeof model !== "string" || !model.trim()) {
+      return res.status(400).json({ error: "model must be a non-empty string" });
+    }
+    setModel(model.trim());
+    console.log(`[API] LLM model changed to: ${getModel()}`);
+    res.json({ model: getModel() });
+  });
+
+  // ── GET /pending-actions ──────────────────────────────────────────────────────
+  app.get("/pending-actions", (_req: Request, res: Response) => {
+    const actions = portfolio.getPendingActions();
+    res.json({ count: actions.length, data: actions });
+  });
+
+  // ── POST /pending-actions/:id/approve ─────────────────────────────────────────
+  app.post("/pending-actions/:id/approve", async (req: Request, res: Response) => {
+    const result = await portfolio.approvePendingAction(req.params.id);
+    if (!result.ok) {
+      const status = result.staleReason ? 409 : result.executionFailed ? 422 : 404;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  });
+
+  // ── POST /pending-actions/:id/reject ──────────────────────────────────────────
+  app.post("/pending-actions/:id/reject", (req: Request, res: Response) => {
+    const result = portfolio.rejectPendingAction(req.params.id);
+    if (!result.ok) return res.status(404).json(result);
+    res.json(result);
+  });
+
   // ── GET /reflections ─────────────────────────────────────────────────────────
   app.get("/reflections", (_req: Request, res: Response) => {
     const store = reflection.getStore();
@@ -213,6 +268,97 @@ export function createApiServer(
       clearInterval(ping);
       unsub();
     });
+  });
+
+  // ── POST /wallet/send ─────────────────────────────────────────────────────
+  // App wallet signs and broadcasts a transfer to the given recipient.
+  // Body: { chainId, tokenAddress?, decimals?, to, amount }
+  app.post("/wallet/send", async (req: Request, res: Response) => {
+    try {
+      const { createWalletClient, http, parseEther, parseUnits, isAddress } = await import("viem");
+      const { privateKeyToAccount } = await import("viem/accounts");
+      const {
+        sepolia, baseSepolia, optimismSepolia, arbitrumSepolia,
+      } = await import("viem/chains");
+
+      const { chainId, tokenAddress, decimals, to, amount } = req.body;
+
+      if (!chainId || !to || !amount) {
+        return res.status(400).json({ error: "Missing required fields: chainId, to, amount" });
+      }
+      if (!isAddress(to)) {
+        return res.status(400).json({ error: "Invalid recipient address" });
+      }
+
+      const privateKey = process.env.APP_WALLET_PRIVATE_KEY as `0x${string}` | undefined;
+      if (!privateKey) {
+        return res.status(500).json({ error: "App wallet not configured (APP_WALLET_PRIVATE_KEY missing)" });
+      }
+
+      const RPC_URLS: Record<number, string> = {
+        11155111: process.env.SEPOLIA_RPC_URL        ?? "https://rpc.sepolia.org",
+        84532:    process.env.BASE_SEPOLIA_RPC_URL   ?? "https://sepolia.base.org",
+        11155420: process.env.OP_SEPOLIA_RPC_URL     ?? "https://sepolia.optimism.io",
+        421614:   process.env.ARB_SEPOLIA_RPC_URL    ?? "https://sepolia-rollup.arbitrum.io/rpc",
+        1301:     process.env.UNICHAIN_SEPOLIA_RPC_URL ?? "https://sepolia.unichain.org",
+      };
+
+      const unichainSepolia = {
+        id: 1301,
+        name: "Unichain Sepolia",
+        nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+        rpcUrls: { default: { http: [RPC_URLS[1301]] } },
+      } as const;
+
+      const CHAINS: Record<number, any> = {
+        11155111: sepolia,
+        84532:    baseSepolia,
+        11155420: optimismSepolia,
+        421614:   arbitrumSepolia,
+        1301:     unichainSepolia,
+      };
+
+      const cid   = Number(chainId);
+      const chain = CHAINS[cid];
+      const rpc   = RPC_URLS[cid];
+      if (!chain || !rpc) {
+        return res.status(400).json({ error: `Unsupported chainId: ${chainId}` });
+      }
+
+      const account = privateKeyToAccount(privateKey);
+      const client  = createWalletClient({ account, chain, transport: http(rpc) });
+
+      let hash: `0x${string}`;
+
+      if (!tokenAddress || tokenAddress === "native") {
+        hash = await client.sendTransaction({
+          to:    to as `0x${string}`,
+          value: parseEther(String(amount)),
+          chain,
+        });
+      } else {
+        const ERC20_ABI = [
+          {
+            type: "function", name: "transfer",
+            inputs: [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
+            outputs: [{ name: "", type: "bool" }],
+            stateMutability: "nonpayable",
+          },
+        ] as const;
+        hash = await client.writeContract({
+          address:      tokenAddress as `0x${string}`,
+          abi:          ERC20_ABI,
+          functionName: "transfer",
+          args:         [to as `0x${string}`, parseUnits(String(amount), Number(decimals ?? 18))],
+          chain,
+        });
+      }
+
+      res.json({ ok: true, txHash: hash, chainId: cid });
+    } catch (err: any) {
+      const msg = err?.shortMessage ?? err?.message ?? "Transaction failed";
+      res.status(500).json({ ok: false, error: msg.length > 200 ? msg.slice(0, 200) + "…" : msg });
+    }
   });
 
   // ── Health ───────────────────────────────────────────────────────────────────

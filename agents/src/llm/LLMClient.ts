@@ -11,8 +11,9 @@ import type { RankedOpportunity } from "../ReporterAgent";
 import type { MockPosition, PortfolioSummary, MacroRegime } from "../PortfolioManager";
 import type { ZeroGMemory, MarketConditions, DecisionRecord } from "../storage/ZeroGMemory";
 import { gasBreakEvenDays } from "../config/chains";
-
-const MODEL         = process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324";
+import { PORTFOLIO_MANAGER_PROMPT } from "./skills/portfolioManagerSkill";
+import { CRITIC_ENTRY_PROMPT, CRITIC_EXIT_PROMPT } from "./skills/criticSkill";
+import { getModel } from "./LLMConfig";
 const CONTEXT_LIMIT = 8;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -40,48 +41,10 @@ export interface DecisionCycle {
   rawTokens:  number;
 }
 
-// ─── Prompt ───────────────────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = `You are EarnYld's autonomous portfolio manager for Uniswap v4 LP positions.
-
-Every 5 minutes you receive current yield opportunities and portfolio state.
-Return ONLY valid JSON — no markdown fences, no keys outside the schema:
-
-{
-  "decisions": [
-    {
-      "action":        "enter" | "exit" | "rebalance" | "hold" | "wait",
-      "pool":          "<poolId>",       // required for enter / exit / rebalance
-      "allocationPct": <number 1–30>,    // % of $10,000 total capital (enter only)
-      "confidence":    <0.0–1.0>,        // your conviction in this decision
-      "reasoning":     "<1–2 sentences>",
-      "exitCondition": "<optional forward trigger>"
-    }
-  ],
-  "reasoning": "<1–2 sentence overall summary>"
-}
-
-Hard constraints (enforced by executor — violations are silently ignored):
-- Max 30 % of capital per pool
-- Max 4 concurrent positions
-- Min 24 h hold before any exit
-- Rebalance: executor checks switchBenefit = (effAPY_new − effAPY_cur) × posValue × 30d/365 − gas − slippage; must exceed 0.5% of position value — only propose rebalances with a compelling improvement in effectiveNetAPY
-- Only decisions with confidence >= 0.75 are executed
-- Portfolio risk budget (all limits are % of $10,000 total capital):
-    chain ≤ 40%  ·  token ≤ 40%  ·  volatile pairs ≤ 50%  ·  stablecoin issuer ≤ 60%  ·  single pool ≤ 30%  ·  cash ≥ 10%
-  Current budget state is shown below — do NOT propose entries that would breach any limit shown as ✗
-
-Ranking priority: prefer pools with high netAPY (= feeAPY − expectedIL). Stable pairs with low IL often beat volatile pairs with high fee APY. Use RAR-7d when available as secondary confirmation.
-
-Decision guide:
-- enter:     open a new LP position in pool (use when cash is available and netAPY is attractive)
-- exit:      close an existing position (use when netAPY or RAR degrades, or better opportunity exists and position is ≥24 h old)
-- rebalance: exit the weakest current position and enter pool in one step
-- hold:      keep current state — use a single hold decision when no action is warranted
-- wait:      data not ready (e.g. IL/RAR still computing) — treated same as hold
-
-Provide multiple decisions if warranted (e.g. enter 2 pools when portfolio is empty).
-For hold/wait, include exactly one decision with no pool field.`;
+// Skills are defined in ./skills/ and imported above.
+// PORTFOLIO_MANAGER_PROMPT  →  portfolioManagerSkill.ts
+// CRITIC_ENTRY_PROMPT       →  criticSkill.ts  (enter / rebalance decisions)
+// CRITIC_EXIT_PROMPT        →  criticSkill.ts  (exit decisions)
 
 // ─── LLMClient ────────────────────────────────────────────────────────────────
 
@@ -116,13 +79,13 @@ export class LLMClient {
     const context   = buildContext(opps, summary, positions, similar);
 
     const response = await this.client.chat.completions.create({
-      model:           MODEL,
+      model:           getModel(),
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: PORTFOLIO_MANAGER_PROMPT },
         { role: "user",   content: context },
       ],
       response_format: { type: "json_object" },
-      max_tokens:      600,
+      max_tokens:      800,
     });
 
     const raw    = response.choices[0]?.message?.content ?? "{}";
@@ -136,6 +99,7 @@ export class LLMClient {
     opp:       RankedOpportunity,
     summary:   PortfolioSummary,
     positions: MockPosition[],
+    position?: MockPosition,   // current held position — required for exit critiques
   ): Promise<CritiqueResult> {
     try {
       const conditions: MarketConditions = {
@@ -143,20 +107,24 @@ export class LLMClient {
         vol7d:    opp.vol7d,
         change7d: opp.pairPriceChange7d * 100,
       };
-      const similar = this.memory.getSimilar(conditions, 3);
-      const context = buildCritiqueContext(decision, opp, summary, positions, similar);
+      const similar      = this.memory.getSimilar(conditions, 3);
+      const isExit       = decision.action === "exit";
+      const systemPrompt = isExit ? CRITIC_EXIT_PROMPT : CRITIC_ENTRY_PROMPT;
+      const context      = isExit
+        ? buildExitCritiqueContext(decision, opp, summary, positions, position, similar)
+        : buildCritiqueContext(decision, opp, summary, positions, similar);
+
       const response = await this.client.chat.completions.create({
-        model:           MODEL,
+        model:           getModel(),
         messages: [
-          { role: "system", content: CRITIC_PROMPT },
+          { role: "system", content: systemPrompt },
           { role: "user",   content: context },
         ],
         response_format: { type: "json_object" },
-        max_tokens:      250,
+        max_tokens:      350,
       });
       return parseCritique(response.choices[0]?.message?.content ?? "{}");
     } catch {
-      // If Critic fails, approve by default — don't let it block execution
       return { veto: false, confidence: 0, reasoning: "Critic unavailable — defaulting to approve" };
     }
   }
@@ -347,39 +315,7 @@ function fmtSimilar(records: DecisionRecord[]): string {
   }).join("\n");
 }
 
-// ─── Critic prompt ────────────────────────────────────────────────────────────
-
-const CRITIC_PROMPT = `You are EarnYld's adversarial risk critic. Your sole job is to find every reason NOT to enter a proposed LP position.
-
-You receive a Seeker's proposed entry and the pool's market data. Be skeptical, not balanced.
-
-Return ONLY valid JSON — no markdown, no extra keys:
-{
-  "veto":       true | false,
-  "confidence": <0.0–1.0>,
-  "reasoning":  "<1–3 sentences — specific risks that justify your verdict>"
-}
-
-Challenge every proposed entry. Look hard for:
-- IL destruction: volatile pairs where expectedIL eats most of the fee APY
-- Weak RAR: RAR-7d ≤ 2.0 is mediocre — is this really worth the IL exposure?
-- Price momentum risk: if the pair moved >5% in 7d, the position may already be out of range
-- TVL red flags: low TVL means thin liquidity, high slippage, and rug exposure
-- APY mirage: unsustainably high APY driven by one-off volume spikes — will it revert? Check lq score: < 40 is a strong warning
-- Liquidity quality: lq/100 composite score (TVL adequacy × vol/TVL activity × APY stability × depth). Score < 40 = thin/unstable pool; weight this heavily
-- APY persistence: medianAPY7d / currentAPY. If persist < 50%, the current APY is a spike vs the 7-day median — treat as temporary, not durable yield
-- Overconcentration: does the portfolio already hold similar token exposure?
-- Capital efficiency (cu): cu = timeInRange × feeCaptureEfficiency. effectiveNetAPY = netAPY × cu. A 40% netAPY pool with cu=50% earns the same as a 20% netAPY pool that stays in range — compare effectiveNetAPY, not raw netAPY. cu < 50% is a strong warning. Check also: if feeCaptureEfficiency < 60%, fees are spike-driven (one-off volume), not sustained.
-- Adverse selection (adv): detects toxic LP flow — fees paid by informed directional traders who are extracting value from LPs. Score 0–100. Score ≥ 45 (elevated) means fee APY, volume, or price drift signals suggest LPs are on the wrong side of informed trades. Score ≥ 70 (high) = strong signal — the fees earned likely don't offset the IL caused by the same traders. Key sub-signals: feeVsPriceMove (fee spike + directional move), postTradePriceDrift (momentum rather than mean reversion), volAcceleration (vol building in second half = ongoing price discovery).
-- Stale data: if RAR is n/a, you have incomplete information — is that acceptable?
-- Token risk: tRisk score (0=safe, 100=dangerous). BLOCKED = hard block (honeypot / balance manipulation / depeg). Score > 40 = meaningful concern. Score > 70 = veto unless everything else is exceptional.
-- Stablecoin risk (sRisk): for stable pools — low APY is NOT automatically safe. Check: peg deviation > 1% is a warning, pool imbalance > 1% shows the pool absorbed a depeg, bridged stablecoins carry extra risk, depeg volatility > 0.5% stdDev means the peg has been unstable. sRisk composite > 40 warrants scrutiny; > 60 is a strong veto signal for what may look like "safe" yield.
-- Switch cost: for rebalances — gas + slippage erodes the gain. The executor enforces a switchBenefit hurdle (0.5% of position value over 30 days), but you should still flag rebalances where effectiveNetAPY is only marginally better.
-- Scenario stress test: downsideScore 0–100 (100 = worst case ≥ −20% in 30 days). expectedShortfall = average of 3 worst scenarios (CVaR proxy). Veto when downsideScore > 60 unless upside is exceptional. Flag when ES < −10%: even average-bad outcomes are deeply negative. Check which scenario is worst — if it's price_down_10 or price_down_20, the pool's IL at concentration leverage is severe. If it's vol_double, the pool's tick range will be breached frequently.
-- Opportunity cost: is this meaningfully better than cash given the risks?
-- Decision scorecard: composite score 0–100 shown as score=X/100[Y|IL|LQ|V|TR|G|C|R]. Each dimension is 0–100. A composite < 40 is weak; < 25 is very weak. Check which specific dimension is pulling the score down — a single 0 (e.g. TR=0 = BLOCKED, G=0 = never breaks even) is a hard red flag even if other dimensions are strong.
-
-Set veto=true and confidence high when you find real risks. Only set veto=false when the opportunity is genuinely compelling AND risks are manageable.`;
+// Critic prompts are imported from ./skills/criticSkill.ts
 
 // ─── Critic context builder ───────────────────────────────────────────────────
 
@@ -479,6 +415,76 @@ function buildCritiqueContext(
     `TOKEN CORRELATION IMPACT (40% limit per token):`,
     corrLines,
     ...(simLines ? [``, `PAST OUTCOMES — 3 closest market conditions (0G memory):`, simLines] : []),
+  ].join("\n");
+}
+
+// ─── Exit critique context builder ───────────────────────────────────────────
+
+function buildExitCritiqueContext(
+  decision:  AgentDecision,
+  opp:       RankedOpportunity,
+  summary:   PortfolioSummary,
+  positions: MockPosition[],
+  position:  MockPosition | undefined,
+  similar:   DecisionRecord[],
+): string {
+  const pos      = position ?? positions.find(p => p.poolId === opp.poolId);
+  const heldH    = pos?.hoursHeld ?? 0;
+  const entryAPY = pos?.entryAPY ?? opp.displayAPY;
+  const pnl      = pos?.pnlUsd ?? 0;
+  const tir      = pos?.timeInRangePct ?? 100;
+  const alerts   = pos?.exitAlerts ?? [];
+
+  const currentNet = opp.netAPY > 0 ? `${opp.netAPY.toFixed(1)}%` : `${opp.displayAPY.toFixed(1)}% (IL unquantified)`;
+  const simLines   = fmtSimilar(similar);
+
+  const rarTrend = pos?.rarTrend ?? [];
+  const rarTrendStr = rarTrend.length > 0
+    ? `[${rarTrend.map(r => r.toFixed(2)).join(" → ")}]`
+    : "(insufficient data)";
+
+  return [
+    `MACRO REGIME: ${fmtRegime(summary.regime)}`,
+    ``,
+    `MANAGER PROPOSES: EXIT ${opp.pair} on ${opp.chainName}`,
+    `Manager reasoning: ${decision.reasoning}`,
+    ``,
+    `POSITION DATA (what we are proposing to close):`,
+    `  Pair:           ${opp.pair} (${opp.feeTierLabel})`,
+    `  Chain:          ${opp.chainName}`,
+    `  Held:           ${fmtHours(heldH)} (min hold = 24h)`,
+    `  Entry APY:      ${entryAPY.toFixed(1)}%`,
+    `  Current APY:    ${opp.displayAPY.toFixed(1)}%  Net: ${currentNet}`,
+    `  Current RAR7d:  ${opp.rar7d > 0 ? opp.rar7d.toFixed(2) : "n/a"}`,
+    `  Entry RAR7d:    ${pos?.entryRAR7d ? pos.entryRAR7d.toFixed(2) : "n/a"}`,
+    `  RAR trend:      ${rarTrendStr}`,
+    `  PnL:            $${pnl.toFixed(2)} (${pos ? ((pnl / pos.entryValueUsd) * 100).toFixed(2) : "?"}% of entry)`,
+    `  Earned fees:    $${(pos?.earnedFeesUsd ?? 0).toFixed(2)}`,
+    `  Time in range:  ${tir.toFixed(0)}%`,
+    `  Tick range:     ±${(pos?.halfRangePct ?? opp.vol7d * 2).toFixed(1)}%`,
+    `  Pair Δ7d:       ${(opp.pairPriceChange7d * 100).toFixed(1)}%`,
+    ...(alerts.length ? [`  Exit alerts:    ${alerts.join(" | ")}`] : [`  Exit alerts:    none`]),
+    ``,
+    `CURRENT POOL METRICS:`,
+    `  TVL:              ${fmtUsd(opp.tvlUsd)}`,
+    `  Liquidity quality:${opp.liquidityQuality > 0 ? ` ${opp.liquidityQuality}/100` : " ? (not yet computed)"}`,
+    `  APY persistence:  ${opp.medianAPY7d > 0 ? `${(opp.apyPersistence * 100).toFixed(0)}% — current ${opp.displayAPY.toFixed(1)}% vs 7d median ${opp.medianAPY7d.toFixed(1)}%` : "? (collecting history)"}`,
+    `  Capital util:     ${opp.capitalUtilization > 0 ? `cu=${(opp.capitalUtilization * 100).toFixed(0)}%  effectiveNetAPY=${opp.effectiveNetAPY.toFixed(1)}%` : "? (not yet computed)"}`,
+    ...(opp.adverseSelection ? [
+      `  Adverse sel:      score=${opp.adverseSelection.score}/100 (${opp.adverseSelection.quality})`,
+    ] : [`  Adverse sel:      ? (not yet computed)`]),
+    ...(opp.stressTest ? [
+      `  Stress test:      downsideScore=${opp.stressTest.downsideScore.toFixed(0)}/100  ES=${opp.stressTest.expectedShortfall30dPct.toFixed(2)}%`,
+    ] : [`  Stress test:      ? (not yet computed)`]),
+    ``,
+    `PORTFOLIO STATE: cash=$${summary.cashUsd.toFixed(0)} positions=${summary.openPositions}/4`,
+    `ALL OPEN POSITIONS:`,
+    positions.length > 0
+      ? positions.map(p =>
+          `  ${p.pair} | ${p.chainName} | entryAPY=${p.entryAPY.toFixed(1)}% | held=${fmtHours(p.hoursHeld)} | PnL=$${p.pnlUsd.toFixed(2)} | TiR=${p.timeInRangePct.toFixed(0)}%`
+        ).join("\n")
+      : "  (none)",
+    ...(simLines ? [``, `PAST OUTCOMES — 3 closest conditions (0G memory):`, simLines] : []),
   ].join("\n");
 }
 

@@ -7,10 +7,13 @@ import type {
 
 export type {
   AdverseSelectionResult,
+  AgentSettings,
   DecisionScorecard,
   EnrichmentError,
   EnrichmentStage,
   OptimizationResult,
+  PendingAction,
+  PendingActionSnapshot,
   PoolRiskResult,
   PortfolioAllocation,
   RankedOpportunity,

@@ -4,6 +4,7 @@ import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./stora
 import { SnapshotStore } from "./storage/SnapshotStore";
 import { LLMClient }    from "./llm/LLMClient";
 import type { AgentDecision, CritiqueResult, DecisionCycle } from "./llm/LLMClient";
+import type { PendingAction, PendingActionSnapshot } from "./api/types";
 import { TICK_SPACINGS, gasBreakEvenDays, GAS_COST_USD } from "./config/chains";
 import type { FeeTier } from "./config/chains";
 // Uniswap v4 SDK utilities for position tick range computation
@@ -50,9 +51,10 @@ const MIN_SWITCH_BENEFIT_PCT = 0.005;  // switch benefit must exceed 0.5% of pos
 const GAS_COST_USD_FALLBACK  = 1.00;   // fallback gas cost for unlisted chains
 const ENTRY_FEE_PCT        = 0.001;  // 0.1% simulated swap cost to enter
 const EXIT_FEE_PCT         = 0.001;  // 0.1% simulated swap cost to exit
-const CHECK_INTERVAL_MS    = 5 * 60_000;
+const CHECK_INTERVAL_MS       = 5 * 60_000;
 const CONFIDENCE_THRESHOLD    = 0.75;
 const DECISION_HISTORY_MAX    = 50;
+const PENDING_ACTION_TTL_MS   = 15 * 60_000; // pending actions expire after 15 min
 
 // ─── Exit trigger thresholds ─────────────────────────────────────────────────
 const RAR_DETERIORATION_RATIO  = 0.50;  // exit if current RAR7d < entry × 0.5
@@ -155,6 +157,8 @@ interface PortfolioSnapshot {
   lastCycle:       DecisionCycle | null;
   decisionHistory: DecisionCycle[];
   regime:          MacroRegime;
+  autonomousMode:  boolean;
+  pendingActions:  PendingAction[];
   savedAt:         number;
 }
 
@@ -177,6 +181,8 @@ export class PortfolioManager {
   private decisionHistory:    DecisionCycle[] = [];
   private regime:             MacroRegime = "neutral";
   private latestOptimization: OptimizationResult | null = null;
+  private autonomousMode      = true;
+  private pendingActions      = new Map<string, PendingAction>();
 
   constructor(reporter: ReporterAgent) {
     this.reporter = reporter;
@@ -275,8 +281,13 @@ export class PortfolioManager {
           console.log(`[Portfolio] Skip (low confidence): ${tag} — ${d.reasoning}`);
           continue;
         }
-        console.log(`[Portfolio] Execute: ${tag} — ${d.reasoning}`);
-        await this.executeDecision(d);
+        if (this.autonomousMode) {
+          console.log(`[Portfolio] Execute: ${tag} — ${d.reasoning}`);
+          await this.executeDecision(d);
+        } else {
+          console.log(`[Portfolio] Queue for approval: ${tag} — ${d.reasoning}`);
+          await this.queueDecisionForApproval(d);
+        }
       }
 
       this.lastRebalance = Date.now();
@@ -306,9 +317,22 @@ export class PortfolioManager {
         break;
       }
 
-      case "exit":
-        if (d.pool) this.toolClose(d.pool, d.reasoning);
+      case "exit": {
+        if (!d.pool) break;
+        const pos = this.positions.get(d.pool);
+        const opp = this.reporter.getLatest().find(o => o.poolId === d.pool);
+        if (pos && opp && this.llm) {
+          const critique = await this.llm.critique(d, opp, this.getSummary(), this.openList(), pos);
+          d.critique = critique;
+          if (critique.veto && critique.confidence >= CONFIDENCE_THRESHOLD) {
+            console.log(`[Portfolio] Critic says don't exit ${pos.pair}: ${critique.reasoning}`);
+            break;
+          }
+          console.log(`[Portfolio] Critic approved exit of ${pos.pair} (conf=${(critique.confidence * 100).toFixed(0)}%): ${critique.reasoning}`);
+        }
+        this.toolClose(d.pool, d.reasoning);
         break;
+      }
 
       case "rebalance": {
         const worst = this.openList().sort((a, b) => a.pnlPct - b.pnlPct)[0];
@@ -364,20 +388,21 @@ export class PortfolioManager {
     };
   }
 
-  private toolOpen(poolId: string, reason: string, allocationPct?: number, agentDecision?: AgentDecision): boolean {
+  private toolOpen(poolId: string, reason: string, allocationPct?: number, agentDecision?: AgentDecision): { ok: boolean; reason: string } {
     const open = this.openList();
     if (open.length >= TARGET_POSITIONS) {
       console.log(`[Portfolio] open rejected — already at max positions (${TARGET_POSITIONS})`);
-      return false;
+      const held = open.map(p => `${p.pair} @ ${p.chainName}`).join(", ");
+      return { ok: false, reason: `Portfolio is at the maximum of ${TARGET_POSITIONS} open positions\nCurrently held: ${held}` };
     }
     const opp = this.reporter.getLatest().find(o => o.poolId === poolId);
     if (!opp) {
       console.log(`[Portfolio] open rejected — pool ${poolId} not found`);
-      return false;
+      return { ok: false, reason: "Pool is no longer available in the current scan — the opportunity has passed" };
     }
     if (this.positions.has(poolId) && this.positions.get(poolId)!.status === "open") {
       console.log(`[Portfolio] open rejected — already in pool ${poolId}`);
-      return false;
+      return { ok: false, reason: `Already invested in ${opp.pair}` };
     }
 
     // Use LLM-requested allocation if provided; else Kelly-inspired sizing
@@ -389,50 +414,73 @@ export class PortfolioManager {
     const viols = checkRiskBudget(opp.pair, opp.chainName, INITIAL_CAPITAL_USD * pct, this.openList(), this.cash, INITIAL_CAPITAL_USD);
     if (viols.length > 0) {
       console.log(`[Portfolio] Risk budget blocked ${opp.pair}: ${viols.map(v => v.message).join(" | ")}`);
-      return false;
+      const bulletList = viols.map(v => `• ${v.message}`).join("\n");
+      return { ok: false, reason: `Risk budget would be exceeded:\n${bulletList}` };
     }
 
     // Gas break-even guard: skip if gas costs take more than MAX_BREAKEVEN_DAYS to recover
     const beDays = gasBreakEvenDays(opp.chainId, INITIAL_CAPITAL_USD * pct, opp.displayAPY);
     if (beDays > MAX_BREAKEVEN_DAYS) {
       console.log(`[Portfolio] Gas break-even ${beDays.toFixed(1)}d > ${MAX_BREAKEVEN_DAYS}d — skip ${opp.pair} on ${opp.chainName}`);
-      return false;
+      const gasCostPerSide = GAS_COST_USD[opp.chainId] ?? GAS_COST_USD_FALLBACK;
+      const posUsd = INITIAL_CAPITAL_USD * pct;
+      const dailyFees = posUsd * (opp.displayAPY / 100) / 365;
+      const lines: string[] = [
+        `${opp.chainName} gas: $${gasCostPerSide.toFixed(2)}/side → $${(gasCostPerSide * 2).toFixed(2)} round-trip`,
+      ];
+      if (allocationPct != null) {
+        lines.push(`Requested allocation: ${allocationPct.toFixed(0)}% → $${posUsd.toFixed(0)}`);
+      } else {
+        const rawKellyPct = opp.rar7d > 1
+          ? (opp.rar7d - 1) / opp.rar7d * 0.25
+          : MAX_POSITION_PCT / TARGET_POSITIONS;
+        lines.push(`Kelly (RAR ${opp.rar7d.toFixed(2)}): f* = ${(rawKellyPct * 100).toFixed(1)}% → $${(INITIAL_CAPITAL_USD * rawKellyPct).toFixed(0)}`);
+        if (this.regime !== "neutral") {
+          const mult = this.regime === "risk-off" ? KELLY_SCALE_RISK_OFF : KELLY_SCALE_RISK_ON;
+          lines.push(`Regime ${this.regime}: ×${mult} → $${posUsd.toFixed(0)} position`);
+        }
+      }
+      lines.push(`Daily fees: $${posUsd.toFixed(0)} × ${opp.displayAPY.toFixed(0)}% ÷ 365 = $${dailyFees.toFixed(2)}/day`);
+      lines.push(`Break-even: $${(gasCostPerSide * 2).toFixed(0)} ÷ $${dailyFees.toFixed(2)}/day = ${beDays.toFixed(0)} days → limit is ${MAX_BREAKEVEN_DAYS} days`);
+      return { ok: false, reason: lines.join("\n") };
     }
 
     // Token risk guard: block honeypots, balance-manipulable contracts, depegged stables
     if (opp.tokenRisk?.blockEntry) {
       console.log(`[Portfolio] Token risk BLOCK: ${opp.pair} — ${opp.tokenRisk.flags.join("; ")}`);
-      return false;
+      const bulletList = opp.tokenRisk.flags.map(f => `• ${f}`).join("\n");
+      return { ok: false, reason: `Token risk blocked entry:\n${bulletList}` };
     }
 
     // Stablecoin depeg guard: block if any stablecoin is > 5% off peg
     if (opp.stablecoinRisk?.blockEntry) {
       console.log(`[Portfolio] Stable depeg BLOCK: ${opp.pair} — ${opp.stablecoinRisk.flags[0]}`);
-      return false;
+      const bulletList = opp.stablecoinRisk.flags.map(f => `• ${f}`).join("\n");
+      return { ok: false, reason: `Stablecoin depeg risk:\n${bulletList}` };
     }
 
     this.enter(opp, INITIAL_CAPITAL_USD * pct, pct * 100, reason, agentDecision);
     this.lastRebalance = Date.now();
     this.persistState();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
-    return true;
+    return { ok: true, reason: `Opened ${opp.pair} on ${opp.chainName}` };
   }
 
-  private toolClose(poolId: string, reason: string): boolean {
+  private toolClose(poolId: string, reason: string): { ok: boolean; reason: string } {
     const pos = this.positions.get(poolId);
     if (!pos || pos.status !== "open") {
       console.log(`[Portfolio] LLM close rejected — no open position for ${poolId}`);
-      return false;
+      return { ok: false, reason: "Position has already been closed or does not exist" };
     }
     const hoursHeld = (Date.now() - pos.entryTimestamp) / 3_600_000;
     if (hoursHeld < MIN_HOLD_HOURS) {
       console.log(`[Portfolio] close rejected — ${pos.pair} only held ${hoursHeld.toFixed(1)}h (min ${MIN_HOLD_HOURS}h)`);
-      return false;
+      return { ok: false, reason: `${pos.pair} has only been held ${hoursHeld.toFixed(1)}h — minimum hold period is ${MIN_HOLD_HOURS}h to prevent excessive churn` };
     }
     const proceeds = this.exit(pos, reason);
     this.persistState();
     console.log(`[Portfolio] closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
-    return true;
+    return { ok: true, reason: `Closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}` };
   }
 
   // ─── Portfolio-aware scorecard enrichment ────────────────────────────────
@@ -711,14 +759,19 @@ export class PortfolioManager {
 
       pos.exitAlerts = alerts;
 
-      // ── Auto-exit: fire when held ≥ minimum and at least one trigger is active ──
+      // ── Auto-exit or queue for approval ──────────────────────────────────────
       if (heldH < MIN_HOLD_HOURS || alerts.length === 0) continue;
 
       const [reason] = alerts;
       console.log(`[Portfolio] Exit trigger — ${pos.pair}@${pos.chainName}: ${reason}`);
-      this.exit(pos, reason);
-      this.lastRebalance = Date.now();
-      this.persistState();
+
+      if (this.autonomousMode) {
+        this.exit(pos, reason);
+        this.lastRebalance = Date.now();
+        this.persistState();
+      } else if (!this.hasPendingExitFor(pos.poolId)) {
+        this.queuePendingExitAction(pos, reason);
+      }
     }
   }
 
@@ -954,6 +1007,195 @@ export class PortfolioManager {
     return this.decisionHistory.slice(0, limit);
   }
 
+  // ─── HITL: mode management ───────────────────────────────────────────────
+  setAutonomousMode(autonomous: boolean): void {
+    this.autonomousMode = autonomous;
+    this.persistState();
+    console.log(`[Portfolio] Mode: ${autonomous ? "autonomous" : "human-in-the-loop"}`);
+  }
+
+  isAutonomousMode(): boolean {
+    return this.autonomousMode;
+  }
+
+  getPendingActions(): PendingAction[] {
+    for (const action of this.pendingActions.values()) {
+      if (action.status === "pending") {
+        const reason = this.checkActionStaleness(action);
+        if (reason) { action.status = "stale"; action.staleReason = reason; }
+      }
+    }
+    return [...this.pendingActions.values()].sort((a, b) => b.queuedAt - a.queuedAt);
+  }
+
+  async approvePendingAction(id: string): Promise<{ ok: boolean; message: string; staleReason?: string; executionFailed?: boolean }> {
+    const action = this.pendingActions.get(id);
+    if (!action) return { ok: false, message: "Action not found" };
+    if (action.status !== "pending") return { ok: false, message: `Action is already ${action.status}` };
+
+    const staleReason = this.checkActionStaleness(action);
+    if (staleReason) {
+      action.status = "stale";
+      action.staleReason = staleReason;
+      this.persistState();
+      return { ok: false, message: "Action is stale", staleReason };
+    }
+
+    action.status = "approved";
+    const result = await this.executeApprovedAction(action);
+    if (!result.ok) {
+      // Revert to pending so the user sees the error and can retry or reject
+      action.status = "pending";
+      this.persistState();
+      return { ok: false, message: result.reason, executionFailed: true };
+    }
+    action.status = "executed";
+    this.lastRebalance = Date.now();
+    this.persistState();
+    return { ok: true, message: "Action executed" };
+  }
+
+  rejectPendingAction(id: string): { ok: boolean; message: string } {
+    const action = this.pendingActions.get(id);
+    if (!action) return { ok: false, message: "Action not found" };
+    if (action.status !== "pending") return { ok: false, message: `Action is already ${action.status}` };
+    action.status = "rejected";
+    this.persistState();
+    return { ok: true, message: "Action rejected" };
+  }
+
+  // ─── HITL: queue helpers ─────────────────────────────────────────────────
+  private async queueDecisionForApproval(d: AgentDecision): Promise<void> {
+    const needsCritique = (d.action === "enter" || d.action === "rebalance" || d.action === "exit")
+      && !!d.pool && !!this.llm && !d.critique;
+
+    let closePool: string | undefined;
+    let closePair: string | undefined;
+    if (d.action === "rebalance") {
+      const worst = this.openList().sort((a, b) => a.pnlPct - b.pnlPct)[0];
+      closePool = worst?.poolId;
+      closePair = worst?.pair;
+    }
+
+    const opp = d.pool ? this.reporter.getLatest().find(o => o.poolId === d.pool) : undefined;
+    const pos  = (d.action === "exit" && d.pool) ? this.positions.get(d.pool) : undefined;
+
+    const snapshot: PendingActionSnapshot | undefined = opp ? {
+      displayAPY: opp.displayAPY, rar7d: opp.rar7d,
+      netAPY: opp.netAPY, effectiveNetAPY: opp.effectiveNetAPY,
+    } : undefined;
+
+    const pending: PendingAction = {
+      id: nextId(),
+      action: d.action as PendingAction["action"],
+      pool: d.pool, closePool,
+      pair: opp?.pair ?? pos?.pair, closePair,
+      chainName: opp?.chainName ?? pos?.chainName,
+      allocationPct: d.allocationPct,
+      confidence: d.confidence,
+      reasoning: d.reasoning,
+      exitCondition: d.exitCondition,
+      critique: d.critique,
+      awaitingCritique: needsCritique || undefined,
+      opportunitySnapshot: snapshot,
+      queuedAt: Date.now(),
+      expiresAt: Date.now() + PENDING_ACTION_TTL_MS,
+      status: "pending",
+    };
+
+    // Queue immediately so the user sees the decision right away
+    this.pendingActions.set(pending.id, pending);
+    console.log(`[Portfolio] Queued ${pending.action} ${pending.pair ?? ""} for approval (id=${pending.id.slice(0, 8)}…)`);
+    this.persistState();
+
+    // Run critique in the background — updates the action when the verdict arrives
+    if (needsCritique && opp) {
+      const heldPos = d.action === "exit" ? pos : undefined;
+      this.llm!.critique(d, opp, this.getSummary(), this.openList(), heldPos)
+        .then(verdict => {
+          pending.critique        = verdict;
+          pending.awaitingCritique = false;
+          console.log(`[Portfolio] Critic verdict for ${pending.pair}: ${verdict.veto ? "VETOED" : "approved"} (${(verdict.confidence * 100).toFixed(0)}%)`);
+          this.persistState();
+        })
+        .catch(err => {
+          pending.awaitingCritique = false;
+          console.warn(`[Portfolio] Critique failed for ${pending.pair}: ${err.message}`);
+          this.persistState();
+        });
+    }
+  }
+
+  private queuePendingExitAction(pos: MockPosition, reason: string): void {
+    const pending: PendingAction = {
+      id: nextId(), action: "exit",
+      pool: pos.poolId, pair: pos.pair, chainName: pos.chainName,
+      confidence: 0.9, reasoning: reason,
+      queuedAt: Date.now(), expiresAt: Date.now() + PENDING_ACTION_TTL_MS,
+      status: "pending",
+    };
+    this.pendingActions.set(pending.id, pending);
+    console.log(`[Portfolio] Queued exit ${pos.pair}@${pos.chainName} for approval: ${reason}`);
+    this.persistState();
+  }
+
+  private hasPendingExitFor(poolId: string): boolean {
+    for (const a of this.pendingActions.values()) {
+      if (a.status !== "pending") continue;
+      if (a.action === "exit" && a.pool === poolId) return true;
+      if (a.action === "rebalance" && a.closePool === poolId) return true;
+    }
+    return false;
+  }
+
+  private checkActionStaleness(action: PendingAction): string | null {
+    if (Date.now() > action.expiresAt) {
+      return `Action expired after ${PENDING_ACTION_TTL_MS / 60_000} minutes — market conditions may have changed`;
+    }
+    if (action.action === "enter" || action.action === "rebalance") {
+      if (action.pool) {
+        const opp = this.reporter.getLatest().find(o => o.poolId === action.pool);
+        if (!opp) return `${action.pair ?? "Pool"} is no longer available in the current scan`;
+        const snap = action.opportunitySnapshot;
+        if (snap && snap.rar7d > 0 && opp.rar7d > 0 && opp.rar7d < snap.rar7d * 0.5) {
+          return `Opportunity quality has deteriorated: RAR7d dropped from ${snap.rar7d.toFixed(2)} to ${opp.rar7d.toFixed(2)} (${((1 - opp.rar7d / snap.rar7d) * 100).toFixed(0)}% decline)`;
+        }
+      }
+    }
+    if (action.action === "exit") {
+      const pos = action.pool ? this.positions.get(action.pool) : undefined;
+      if (!pos || pos.status !== "open") return "Position has already been closed";
+    }
+    return null;
+  }
+
+  private async executeApprovedAction(a: PendingAction): Promise<{ ok: boolean; reason: string }> {
+    switch (a.action) {
+      case "enter":
+        if (!a.pool) return { ok: false, reason: "No pool specified" };
+        return this.toolOpen(a.pool, a.reasoning, a.allocationPct);
+
+      case "exit":
+        if (!a.pool) return { ok: false, reason: "No pool specified" };
+        return this.toolClose(a.pool, a.reasoning);
+
+      case "rebalance": {
+        if (!a.pool) return { ok: false, reason: "No pool specified" };
+        const closePoolId = (a.closePool && this.positions.get(a.closePool)?.status === "open")
+          ? a.closePool
+          : this.openList().sort((x, y) => x.pnlPct - y.pnlPct)[0]?.poolId;
+        if (closePoolId) {
+          const closeResult = this.toolClose(closePoolId, `Rebalancing into ${a.pool}: ${a.reasoning}`);
+          if (!closeResult.ok) return closeResult;
+        }
+        return this.toolOpen(a.pool, a.reasoning, a.allocationPct);
+      }
+
+      default:
+        return { ok: true, reason: "no-op" };
+    }
+  }
+
   private restoreState(): void {
     try {
       const snapshot = this.snapshots.load<PortfolioSnapshot>("portfolio.state");
@@ -967,6 +1209,8 @@ export class PortfolioManager {
       this.lastCycle       = snapshot.lastCycle ?? null;
       this.decisionHistory = snapshot.decisionHistory ?? [];
       this.regime          = snapshot.regime ?? "neutral";
+      this.autonomousMode  = snapshot.autonomousMode ?? true;
+      this.pendingActions  = new Map((snapshot.pendingActions ?? []).map(a => [a.id, a]));
       this.updateValues();
 
       console.log(
@@ -989,6 +1233,8 @@ export class PortfolioManager {
         lastCycle:       this.lastCycle,
         decisionHistory: this.decisionHistory,
         regime:          this.regime,
+        autonomousMode:  this.autonomousMode,
+        pendingActions:  [...this.pendingActions.values()],
         savedAt:         Date.now(),
       });
     } catch (err) {

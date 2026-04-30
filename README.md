@@ -21,18 +21,22 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │                        │ TokenRiskAssessor (GoPlus)│      Risk Budget       │
 │                        │ StablecoinRiskAssessor    │      Portfolio Opt.    │
 │                        │ AdverseSelectionDetector  │      DecisionScorecard │
-│                        │ ScenarioStressTester      │                       │
-│                        │ DecisionScorecard         │                       │
+│                        │ ScenarioStressTester      │      LLMConfig (runtime│
+│                        │ DecisionScorecard         │       model switching) │
 │                        └──────────────────────────┘                       │
 │                                                                            │
-│  REST + SSE API ──────────────────────────────────────────────────────────►│
+│  REST + SSE API  ·  App Wallet signer (viem + APP_WALLET_PRIVATE_KEY) ───►│
 └────────────────────────────────────────────────────────────────────────────┘
                               ▼  HTTP
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  frontend/  (Next.js 14, port 3000)                                        │
 │                                                                            │
-│  YieldTable (22 columns)   PositionsTable   DecisionFeed   Reflections     │
-│  RiskBudgetPanel           Swagger /docs                                   │
+│  YieldTable (22 columns)   PositionsTable    DecisionFeed   Reflections    │
+│  RiskBudgetPanel           PendingActionsPanel (HITL approve/reject)       │
+│  AppWalletBalances         TransferModal (Send/Receive testnet tokens)     │
+│  LLMSelector               WalletButton (RainbowKit)   Swagger /docs       │
+│                                                                            │
+│  wagmi v2 + RainbowKit v2 — MetaMask / Base Wallet / WalletConnect        │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -206,6 +210,112 @@ Median `pairPriceChange7d` across all ETH-containing pools:
 | −5% to +5% | `neutral` | Normal Kelly sizing |
 | > +5% | `risk-on` | Kelly × 1.5 (capped at 30%) |
 
+### Human-in-the-Loop (HITL) mode
+
+When the agent is switched to **Human-in-Loop** mode via the toggle in the dashboard header, every portfolio decision is queued as a **Pending Action** instead of being executed automatically. A panel appears in the dashboard listing each queued decision with full context: the pool, reasoning, entry/exit conditions, and the Critic's verdict.
+
+**Approve / Reject controls**
+
+- **Approve** — executes the action immediately. The agent re-validates the opportunity at the moment of approval; if it has gone stale (TTL exceeded or opportunity no longer in the top list) a 409 is returned and the action reverts to pending with a reason displayed to the user.
+- **Reject** — discards the pending action. The agent will re-evaluate the opportunity on the next cycle.
+
+**Rich execution failure feedback**
+
+If a position cannot be opened after approval, the exact reason is surfaced in the UI in a styled code block rather than silently failing. Reasons include detailed calculations:
+
+```
+Sepolia gas: 4.50/side → 9.00 round-trip
+Kelly fraction: (1.80 − 1) / 1.80 = 0.44 → ¼ Kelly = 0.11
+Regime multiplier: 0.5× (risk-off)
+Adjusted Kelly: 0.11 × 0.5 = 0.055
+Position size: $10000 × 0.055 = $554
+Daily fees at 64% APY: $554 × 64% / 365 = $0.97/day
+Break-even: 9 ÷ 0.97/day = 9 days → limit is 7 days
+```
+
+Other failure reasons (risk budget violations, max positions reached with the held list, token hard-blocks) are similarly expanded with bullet-point detail.
+
+**Staleness detection**
+
+Pending actions carry a TTL. If the opportunity's enrichment data is older than the configured threshold when Approve is clicked, the action is rejected with a 409 and the stale reason is shown — e.g. "Pool data is 4.2 minutes old (limit 3 min)".
+
+### Wallet connection (RainbowKit)
+
+A **Connect Wallet** button in the top-right header opens the RainbowKit modal, supporting MetaMask, Base Wallet, WalletConnect, and any EIP-1193 provider. Once connected:
+
+- The button shows the truncated wallet address as a monospace chip
+- It turns green and relabels to **Disconnect Wallet** (hover → red)
+
+The wagmi configuration includes both mainnet and testnet chains:
+
+| Network type | Chains |
+|---|---|
+| Mainnet | Ethereum, Base, Optimism, Arbitrum, Unichain |
+| Testnet | Sepolia, Base Sepolia, OP Sepolia, Arb Sepolia, Unichain Sepolia |
+
+### Transfer Funds panel
+
+A **💸 Transfer** button in the header opens a modal with two tabs:
+
+**Send tab** — App wallet → your connected wallet (no MetaMask required)
+- "From" displays the app wallet address (read-only)
+- "To" defaults to the connected wallet address (editable)
+- Shows the app wallet's live token balance for the selected chain/token
+- "Send" button calls `POST /wallet/send` on the backend; the app wallet signs and broadcasts the transaction server-side using `APP_WALLET_PRIVATE_KEY`
+
+**Receive tab** — Your connected wallet → app wallet (MetaMask signs)
+- "From" displays your connected wallet address (read-only)
+- "To" defaults to the app wallet address (editable)
+- Shows your connected wallet's live balance with a MAX button
+- "Send" button triggers a native MetaMask/Base Wallet confirmation popup
+- Supports ETH and ERC-20 tokens (`transfer(address, uint256)`)
+
+Both tabs support all five testnets and the token registry for each:
+
+| Chain | Tokens |
+|---|---|
+| Sepolia | ETH, USDC, WETH, LINK, DAI |
+| Base Sepolia | ETH, USDC |
+| OP Sepolia | ETH, USDC |
+| Arb Sepolia | ETH, USDC |
+| Unichain Sepolia | ETH |
+
+Switching network in the dropdown triggers `switchChainAsync` — MetaMask prompts to switch. Transaction hashes link to the correct block explorer.
+
+### Application wallet
+
+A dedicated server-side wallet is generated for EarnYld and stored in `.env`:
+
+```env
+APP_WALLET_PRIVATE_KEY=0x...   # server-only, never sent to browser
+NEXT_PUBLIC_APP_WALLET_ADDRESS=0x...  # public address, safe to expose
+```
+
+The private key is used exclusively by the `POST /wallet/send` backend endpoint (via `viem`'s `createWalletClient` + `privateKeyToAccount`). The browser never sees the private key.
+
+### App Wallet Balances widget
+
+A persistent card at the top of the main dashboard column shows the app wallet's live token balances across all five testnets. A chain selector tabs between Sepolia, Base Sep, OP Sep, Arb Sep, and Uni Sep. Each token (ETH, USDC, WETH, LINK, DAI where available) displays its balance via wagmi's `useBalance` hook, updating in real time.
+
+### Runtime LLM model switching
+
+A **🤖 Choose LLM** button in the header opens a model-selection panel. The dropdown lists 18 models across 6 providers, grouped by provider with colour-coded badges:
+
+| Provider | Models available |
+|---|---|
+| DeepSeek | V3 (default), R1, R1 Distill |
+| OpenAI | GPT-4o, GPT-4o Mini, GPT-4 Turbo, o1 Mini |
+| Anthropic | Claude 3.5 Sonnet, Claude 3.5 Haiku, Claude 3 Opus |
+| Meta | Llama 3.1 405B, Llama 3.1 70B, Llama 3.3 70B |
+| Mistral | Mistral Large, Mistral Small |
+| Google | Gemini 1.5 Pro, Gemini 1.5 Flash, Gemini 2.0 Flash |
+
+A **"Enter a custom model ID"** toggle accepts any model available at openrouter.ai/models.
+
+Clicking **Apply** calls `POST /settings/llm`. The model change takes effect on the next LLM invocation — no agent restart required. Both the Seeker/Critic (`LLMClient`) and the Reflection Agent call `getModel()` at call time from a shared `LLMConfig` singleton.
+
+The catalogue is hardcoded in the frontend so the dropdown is always populated regardless of whether the agent API is reachable.
+
 ### LLM pipeline — Seeker → Critic → Executor
 When `OPENROUTER_API_KEY` is set, every 5-minute cycle runs two sequential LLM calls:
 
@@ -314,7 +424,18 @@ npm run dev             # hot-reload for development
 
 The agent starts on **port 3001**. Enrichment is asynchronous — LQ, Eff. APY, T.Risk, Adv.Sel, Stress, and Score columns populate over the first 1–2 minutes per pool. If an enrichment stage fails, the pool is marked degraded and the stage error is logged and exposed in the API. APY Persistence requires 6+ hours of history to accumulate.
 
-### 4. Start the frontend
+### 4. Configure the frontend environment
+
+Next.js reads env vars from `frontend/.env.local` (not the root `.env`). Create it:
+
+```bash
+# frontend/.env.local
+NEXT_PUBLIC_AGENT_API_URL=http://localhost:3001
+NEXT_PUBLIC_APP_WALLET_ADDRESS=0x...          # from APP_WALLET_PRIVATE_KEY derivation
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=...      # optional; placeholder works for local dev
+```
+
+### 5. Start the frontend
 
 ```bash
 cd frontend
@@ -327,12 +448,27 @@ Open **http://localhost:3000**.
 
 ## Dashboard
 
-Full-viewport layout with a right sidebar for AI chat:
+Full-viewport layout with a right sidebar for AI reflections and decisions.
 
-- **Yield Opportunities tab** — 22-column table sorted by Effective Net APY by default. All columns have hover tooltips explaining their computation. Sortable by Eff. APY, RAR, TVL, LQ, Persistence, Stress score, and Scorecard composite.
-- **Positions tab** — open and closed positions with time-in-range progress bar, exit alerts, grade (A–F), and realised APY.
-- **Right sidebar** — LLM Decisions feed (Seeker → Critic → Executor per cycle) and hourly Reflections with live SSE streaming.
-- **Risk Budget panel** — six progress bars showing current portfolio exposure vs limits. Red when a constraint is breached.
+**Header bar (left → right)**
+- 🌾 EarnYld branding + scan timestamp
+- Autonomous / Human-in-Loop mode toggle (with pending-action badge count)
+- Refresh button
+- API Docs link
+- 🤖 Choose LLM — opens model selector panel
+- 💸 Transfer — opens Send/Receive testnet token modal
+- Connect Wallet / address chip / Disconnect (RainbowKit)
+
+**Main column (top → bottom)**
+- **App Wallet Balances** — live token balances for the app wallet across all testnets, chain-switchable
+- **Stats bar** — Pools Found, Open Positions, Total Trades, Fees Earned, Unrealised PnL, Last Decision badge
+- **Risk Budget panel** — six progress bars (chain, token, volatile, issuer, pool, cash). Red when a constraint is breached
+- **Pending Actions panel** (HITL mode only) — queued decisions with Approve / Reject buttons and rich execution failure feedback
+- **Yield Opportunities tab** — 22-column table sorted by Effective Net APY. All columns have hover tooltips. Sortable by Eff. APY, RAR, TVL, LQ, Persistence, Stress score, and Scorecard composite
+- **Positions tab** — open and closed positions with time-in-range progress bar, exit alerts, grade (A–F), and realised APY
+
+**Right sidebar**
+- LLM Decisions feed (Seeker → Critic → Executor per cycle) and hourly Reflections with live SSE streaming
 
 ---
 
@@ -355,6 +491,14 @@ Interactive Swagger UI at **http://localhost:3000/docs**.
 | GET | `/stats` | Agent-level counters |
 | GET | `/chains` | Active chain configs |
 | POST | `/slippage/check` | Simulate a swap and return slippage estimate |
+| GET | `/settings` | `{ autonomousMode }` |
+| POST | `/settings` | Toggle autonomous/HITL mode — body `{ autonomousMode: bool }` |
+| GET | `/settings/llm` | `{ model, availableModels }` — current LLM and catalogue |
+| POST | `/settings/llm` | Switch active LLM — body `{ model: "openai/gpt-4o" }` — takes effect on next call, no restart needed |
+| GET | `/pending-actions` | Queued HITL decisions |
+| POST | `/pending-actions/:id/approve` | Execute a pending action. Returns 409 if stale, 422 if execution failed with reason |
+| POST | `/pending-actions/:id/reject` | Discard a pending action |
+| POST | `/wallet/send` | App wallet signs and broadcasts a testnet transfer. Body: `{ chainId, to, amount, tokenAddress?, decimals? }` |
 | GET | `/health` | Liveness check |
 
 ### Shared API contract
@@ -390,7 +534,8 @@ earnYld/
 │       │   └── RiskBudget.ts                 # Portfolio-level constraint checks
 │       ├── llm/
 │       │   ├── LLMClient.ts                  # Seeker + Critic LLM calls (OpenRouter)
-│       │   └── ReflectionAgent.ts            # Hourly streaming reflection
+│       │   ├── ReflectionAgent.ts            # Hourly streaming reflection
+│       │   └── LLMConfig.ts                  # Mutable model singleton (getModel/setModel)
 │       ├── storage/
 │       │   ├── ZeroGMemory.ts                # 0G KV episodic memory (RAG)
 │       │   ├── ReflectionStore.ts            # SQLite reflection persistence
@@ -408,10 +553,17 @@ earnYld/
         │   ├── index.tsx                     # Main dashboard
         │   └── docs.tsx                      # Swagger UI
         ├── components/
-        │   ├── YieldTable.tsx                # 23-column ranked pool table
+        │   ├── YieldTable.tsx                # 22-column ranked pool table
         │   ├── PositionsTable.tsx            # Positions with TiR, exit alerts
         │   ├── DecisionFeed.tsx              # LLM decisions + Critic verdict
-        │   └── ReflectionSidebar.tsx         # SSE-streamed hourly reflections
+        │   ├── ReflectionSidebar.tsx         # SSE-streamed hourly reflections
+        │   ├── PendingActionsPanel.tsx       # HITL approve/reject with rich failure detail
+        │   ├── WalletButton.tsx              # RainbowKit connect/disconnect button
+        │   ├── TransferModal.tsx             # Send/Receive testnet token modal
+        │   ├── AppWalletBalances.tsx         # Live app wallet balance widget (all testnets)
+        │   └── LLMSelector.tsx              # OpenRouter model picker (18 models, 6 providers)
+        ├── lib/
+        │   └── wagmiConfig.ts                # wagmi + RainbowKit chain configuration
         └── types/
             └── api.ts                        # Shared TypeScript types
 ```
@@ -437,6 +589,9 @@ earnYld/
 | `ZEROG_STREAM_ID` | (hardcoded default) | 0G KV stream for decision records |
 | `MAX_SLIPPAGE_BPS` | `50` | Slippage guard threshold (0.5%) |
 | `NEXT_PUBLIC_AGENT_API_URL` | `http://localhost:3001` | Frontend → agent URL |
+| `APP_WALLET_PRIVATE_KEY` | — | Private key for the EarnYld app wallet (server-only, never exposed to browser) |
+| `NEXT_PUBLIC_APP_WALLET_ADDRESS` | — | Public address of the app wallet — shown in the Transfer modal and balance widget |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | `earnYld_placeholder` | WalletConnect project ID (get one at cloud.walletconnect.com) |
 | `THEGRAPH_API_KEY` | — | Enables The Graph Uniswap v4 subgraph enrichment |
 
 ---

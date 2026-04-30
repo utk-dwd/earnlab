@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Light background circle -->
+  <circle cx="32" cy="32" r="30" fill="#fffbeb"/>
+
+  <!-- ── Left tulip ── -->
+  <!-- Stem -->
+  <line x1="24" y1="52" x2="24" y2="34" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Left leaf curving out -->
+  <path d="M24 44 Q17 40 15 33 Q20 37 24 43" fill="#22c55e"/>
+  <!-- Tulip cup (3 overlapping petals) -->
+  <path d="M24 34 Q18 28 19 20 Q22 26 24 33" fill="#fbbf24"/>
+  <path d="M24 34 Q30 28 29 20 Q26 26 24 33" fill="#f59e0b"/>
+  <path d="M24 34 Q21 25 24 19 Q27 25 24 34" fill="#fde68a"/>
+
+  <!-- ── Right tulip (taller) ── -->
+  <!-- Stem -->
+  <line x1="40" y1="52" x2="40" y2="30" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Right leaf curving out -->
+  <path d="M40 42 Q47 37 49 30 Q44 34 40 41" fill="#22c55e"/>
+  <!-- Tulip cup -->
+  <path d="M40 30 Q34 23 35 14 Q38 21 40 29" fill="#fbbf24"/>
+  <path d="M40 30 Q46 23 45 14 Q42 21 40 29" fill="#f59e0b"/>
+  <path d="M40 30 Q37 20 40 13 Q43 20 40 30" fill="#fde68a"/>
+
+  <!-- Ground line -->
+  <path d="M16 52 Q32 50 48 52" stroke="#16a34a" stroke-width="2" fill="none" stroke-linecap="round"/>
+</svg>

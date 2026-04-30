@@ -12,7 +12,7 @@ import type { PortfolioManager } from "../PortfolioManager";
 import { ReflectionStore }      from "../storage/ReflectionStore";
 import { ZeroGMemory }          from "../storage/ZeroGMemory";
 
-const MODEL               = process.env.LLM_MODEL    ?? "deepseek/deepseek-chat-v3-0324";
+import { getModel } from "./LLMConfig";
 const REFLECT_INTERVAL_MS = Number(process.env.REFLECT_INTERVAL_MS ?? 60 * 60 * 1000);
 const MAX_TOKENS          = 350;
 
@@ -96,7 +96,7 @@ export class ReflectionAgent {
       let fullContent = "";
 
       const stream = await this.client.chat.completions.create({
-        model:      MODEL,
+        model:      getModel(),
         messages,
         stream:     true,
         max_tokens: MAX_TOKENS,
