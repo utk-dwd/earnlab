@@ -7,7 +7,8 @@ import { ReflectionAgent }  from "./llm/ReflectionAgent";
 import { startApiServer }   from "./api/server";
 import { zeroGStorage }     from "./og/ZeroGStorageClient";
 
-const API_PORT = Number(process.env.AGENT_API_PORT ?? 3001);
+// Railway (and most cloud hosts) inject PORT; fall back to AGENT_API_PORT for local dev
+const API_PORT = Number(process.env.PORT ?? process.env.AGENT_API_PORT ?? 3001);
 
 async function main() {
   await zeroGStorage.init();

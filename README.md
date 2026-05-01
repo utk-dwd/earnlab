@@ -636,6 +636,36 @@ Token URI format: `0g://{storageUri}` — resolves via the 0G Storage indexer.
 
 ---
 
+### Telegram notifications
+
+Set two variables in `.env` and the agent broadcasts every significant event to Telegram — no restart required, no code changes.
+
+```env
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+TELEGRAM_CHAT_ID=6272037379,-1003983195163   # comma-separated list: personal DM, channel, group, ...
+```
+
+**Events posted automatically:**
+
+| Event | Emoji | Trigger |
+|---|---|---|
+| Hourly reflection | 🌾 | LLM commentary complete |
+| Position opened | ✅ | Autonomous mode or HITL approved |
+| Position closed | 📤 | Any exit (LLM or rule-based) |
+| Critic veto | 🚫 | Seeker proposal blocked |
+| HITL pending | ⏳ | New action queued for approval |
+| Exit signal | ⚠️ | Rule-based exit trigger in HITL mode |
+
+**Setup (2 minutes):**
+1. Message **@BotFather** on Telegram → `/newbot` → copy the token
+2. Add the bot to your channel/group and send any message
+3. Visit `https://api.telegram.org/bot<TOKEN>/getUpdates` → copy `chat.id`
+4. For a channel, the chat ID starts with `-100…`; multiple IDs are comma-separated
+
+`TELEGRAM_CHAT_ID` accepts a single ID or a comma-separated list — every message is broadcast to all recipients in parallel. When either variable is absent all calls are silent no-ops.
+
+---
+
 ### Application wallet
 
 A dedicated server-side wallet is generated for EarnYld and stored in `.env`:
@@ -725,6 +755,66 @@ Snapshots are stored in `agents/data/snapshots.db`. On restart, `ReporterAgent` 
 
 ---
 
+## Deployment
+
+The frontend and backend are deployed independently. The live demo runs at:
+
+| Service | URL |
+|---|---|
+| Frontend | **https://earnyld.0gskills.com** |
+| Backend API | https://api.earnyld.0gskills.com *(Railway)* |
+
+### Frontend — Vercel
+
+The Next.js frontend is deployed to [Vercel](https://vercel.com) and served from `earnyld.0gskills.com`.
+
+```bash
+npm install -g vercel
+cd frontend
+vercel --prod --yes --scope <your-team> \
+  -e NEXT_PUBLIC_AGENT_API_URL=https://api.earnyld.0gskills.com \
+  -e NEXT_PUBLIC_APP_WALLET_ADDRESS=0x... \
+  -e NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=...
+```
+
+**DNS** (add to your DNS provider):
+| Type | Name | Value |
+|---|---|---|
+| `CNAME` | `earnyld` | `cname.vercel-dns.com` |
+| `TXT` | `_vercel` | *(shown by Vercel when you add the domain)* |
+
+To redeploy after an env var change (Next.js bakes `NEXT_PUBLIC_*` at build time):
+```bash
+cd frontend && vercel --prod --yes --scope <your-team>
+```
+
+### Backend — Railway
+
+The agent API is deployed to [Railway](https://railway.app) from the `agents/` subdirectory. `railway.toml` sets the build and start commands; Railway injects `PORT` automatically.
+
+```bash
+npm install -g @railway/cli
+cd agents
+railway login --browserless   # opens railway.com/activate in browser
+railway init                  # create empty project + empty service
+railway up                    # deploy from current directory
+```
+
+Set all variables from `.env` in the Railway dashboard under **Variables**, then add:
+```env
+PORT=             # injected automatically by Railway — do not set manually
+NETWORK_FILTER=testnet   # recommended for demo; reduce to testnet chains only
+```
+
+To expose the service publicly: Railway dashboard → your service → **Settings** → **Networking** → **Generate Domain**. Use that URL (or your custom `api.earnyld.0gskills.com` CNAME) as `NEXT_PUBLIC_AGENT_API_URL` in Vercel.
+
+**Notes:**
+- SQLite state (`agents/data/`) is ephemeral on Railway's free tier — portfolio history resets on redeploy. Use a Railway volume or export snapshots to persist state across deploys.
+- The agent scans all 18 chains on startup. Set `NETWORK_FILTER=testnet` to reduce Alchemy API usage on the free RPC tier.
+- `railway up` deploys from local files; push to GitHub and link the repo in Railway for automatic deploys on push to `main`.
+
+---
+
 ## Getting started
 
 ### Prerequisites
@@ -784,7 +874,13 @@ Next.js reads env vars from `frontend/.env.local` (not the root `.env`). Create 
 
 ```bash
 # frontend/.env.local
+
+# Local dev — points to local agent
 NEXT_PUBLIC_AGENT_API_URL=http://localhost:3001
+
+# Hosted — points to Railway backend
+# NEXT_PUBLIC_AGENT_API_URL=https://api.earnyld.0gskills.com
+
 NEXT_PUBLIC_APP_WALLET_ADDRESS=0x...          # from APP_WALLET_PRIVATE_KEY derivation
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=...      # optional; placeholder works for local dev
 ```
@@ -796,7 +892,7 @@ cd frontend
 npm run dev
 ```
 
-Open **http://localhost:3000**.
+Open **http://localhost:3000** (local) or **https://earnyld.0gskills.com** (hosted).
 
 ---
 
@@ -880,6 +976,7 @@ The frontend re-exports opportunity and enrichment contract types from `agents/s
 earnYld/
 ├── keeperhub-workflow.yaml               # Three importable KeeperHub workflows
 │                                         #   (Monitor+Rebalance, Entry Discovery, Hook Alert)
+├── vercel.json                           # Vercel build config for frontend deployment
 ├── contracts/
 │   └── EarnYldAgentINFT.sol              # ERC-7857-style INFT contract (0G Galileo testnet)
 ├── agents/
@@ -909,6 +1006,9 @@ earnYld/
 │       │   ├── LLMClient.ts                  # Seeker + Critic LLM calls (OpenRouter)
 │       │   ├── ReflectionAgent.ts            # Hourly streaming reflection
 │       │   └── LLMConfig.ts                  # Mutable model singleton (getModel/setModel)
+│       ├── notifications/
+│       │   └── TelegramNotifier.ts           # Fire-and-forget Telegram bot notifications
+│       │                                     #   (reflections, opens, closes, HITL, vetoes)
 │       ├── og/
 │       │   └── ZeroGStorageClient.ts         # Upload/retrieve agent state bundles
 │       │                                     #   on 0G Storage (sha256 content URIs)
@@ -928,6 +1028,7 @@ earnYld/
 │       │   ├── server.ts                     # Express REST + SSE endpoints
 │       │   │                                 #   (swap, keeper, wallet, portfolio, inft)
 │       │   └── types.ts                      # Shared API contract types (incl. INFT)
+│       ├── railway.toml                      # Railway build + start config for hosted deploy
 │       └── config/
 │           └── chains.ts                     # Chain configs, tick spacings,
 │                                             #   gas estimates, known tokens
@@ -975,6 +1076,8 @@ earnYld/
 | `ZEROG_STREAM_ID` | (hardcoded default) | 0G KV stream for decision records |
 | `ZEROG_AGENT_STREAM_ID` | (hardcoded default) | 0G KV stream for INFT agent state bundles |
 | `INFT_CONTRACT_ADDRESS` | — | Deployed address of EarnYldAgentINFT.sol on 0G Galileo; demo mode if unset |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather; notifications disabled if absent |
+| `TELEGRAM_CHAT_ID` | — | Comma-separated chat/channel IDs to broadcast to |
 | `MAX_SLIPPAGE_BPS` | `50` | Slippage guard threshold (0.5%) |
 | `NEXT_PUBLIC_AGENT_API_URL` | `http://localhost:3001` | Frontend → agent URL |
 | `APP_WALLET_PRIVATE_KEY` | — | Private key for the EarnYld app wallet (server-only, never exposed to browser) |

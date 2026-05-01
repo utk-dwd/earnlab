@@ -12,7 +12,8 @@ import type { PortfolioManager } from "../PortfolioManager";
 import { ReflectionStore }      from "../storage/ReflectionStore";
 import { ZeroGMemory }          from "../storage/ZeroGMemory";
 
-import { getModel } from "./LLMConfig";
+import { getModel }  from "./LLMConfig";
+import { telegram } from "../notifications/TelegramNotifier";
 const REFLECT_INTERVAL_MS = Number(process.env.REFLECT_INTERVAL_MS ?? 60 * 60 * 1000);
 const MAX_TOKENS          = 350;
 
@@ -117,6 +118,7 @@ export class ReflectionAgent {
 
       this.emit({ type: "complete", timestamp: ts, content: fullContent, summary, id });
       console.log(`[Reflection] Done — ${fullContent.length} chars, id=${id}`);
+      telegram.send(`🌾 EarnYld Reflection\n\n${fullContent}`);
     } catch (err: any) {
       console.warn(`[Reflection] Failed: ${err.message}`);
       this.emit({ type: "error", timestamp: ts, error: err.message });
