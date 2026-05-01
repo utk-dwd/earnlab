@@ -1,0 +1,200 @@
+{
+  "name": "EarnYld Yield Optimizer",
+  "description": "Periodically fetch top Uniswap v4 yield opportunities from EarnYld and notify via Discord, Telegram, or webhook.",
+  "nodes": [
+    {
+      "id": "trigger-schedule",
+      "type": "trigger",
+      "position": { "x": 100, "y": 100 },
+      "data": {
+        "label": "Schedule",
+        "description": "Run every 15 minutes",
+        "type": "trigger",
+        "config": {
+          "triggerType": "Schedule",
+          "cron": "*/15 * * * *"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "fetch-yields",
+      "type": "action",
+      "position": { "x": 100, "y": 250 },
+      "data": {
+        "label": "Fetch Yields",
+        "description": "Get ranked yield opportunities from EarnYld",
+        "type": "action",
+        "config": {
+          "actionType": "webhook/send",
+          "url": "{{earnlabBaseUrl}}/yields?limit={{limit}}&minAPY={{minAPY}}&chainId={{chainId}}",
+          "method": "GET",
+          "headers": {
+            "Content-Type": "application/json"
+          }
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "has-results",
+      "type": "condition",
+      "position": { "x": 100, "y": 400 },
+      "data": {
+        "label": "Has Results?",
+        "description": "Check if any yield opportunities were returned",
+        "type": "condition",
+        "config": {
+          "conditions": [
+            {
+              "left": "{{fetch-yields.response.data.length}}",
+              "operator": ">",
+              "right": "0"
+            }
+          ]
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "notify-yields",
+      "type": "action",
+      "position": { "x": 350, "y": 550 },
+      "data": {
+        "label": "Notify Top Yields",
+        "description": "Send top yield opportunities to notification channel",
+        "type": "action",
+        "config": {
+          "actionType": "webhook/send",
+          "url": "{{notifyTarget}}",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Top EarnYld Yield Opportunities",
+            "opportunities": "{{fetch-yields.response.data}}"
+          }
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "notify-empty",
+      "type": "action",
+      "position": { "x": -150, "y": 550 },
+      "data": {
+        "label": "Notify Empty",
+        "description": "Notify when no yields match criteria",
+        "type": "action",
+        "config": {
+          "actionType": "webhook/send",
+          "url": "{{notifyTarget}}",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "No EarnYld yield opportunities matched the current criteria."
+          }
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "notify-error",
+      "type": "action",
+      "position": { "x": 100, "y": 700 },
+      "data": {
+        "label": "Notify Error",
+        "description": "Alert when EarnYld API call fails",
+        "type": "action",
+        "config": {
+          "actionType": "webhook/send",
+          "url": "{{notifyTarget}}",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "EarnYld yield fetch failed: {{fetch-yields.error.message}}"
+          }
+        },
+        "status": "idle"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-trigger-fetch",
+      "source": "trigger-schedule",
+      "target": "fetch-yields"
+    },
+    {
+      "id": "edge-fetch-condition",
+      "source": "fetch-yields",
+      "target": "has-results"
+    },
+    {
+      "id": "edge-true-yields",
+      "source": "has-results",
+      "target": "notify-yields",
+      "sourceHandle": "true"
+    },
+    {
+      "id": "edge-false-empty",
+      "source": "has-results",
+      "target": "notify-empty",
+      "sourceHandle": "false"
+    },
+    {
+      "id": "edge-error",
+      "source": "fetch-yields",
+      "target": "notify-error",
+      "sourceHandle": "error"
+    }
+  ],
+  "inputs": {
+    "earnlabBaseUrl": {
+      "type": "string",
+      "description": "Base URL of the EarnYld agent API",
+      "default": "http://localhost:3001",
+      "required": true
+    },
+    "chainId": {
+      "type": "number",
+      "description": "Filter by chain ID (e.g. 1, 8453)",
+      "required": false
+    },
+    "network": {
+      "type": "string",
+      "enum": ["mainnet", "testnet", "all"],
+      "description": "Filter by network environment",
+      "default": "all",
+      "required": false
+    },
+    "minAPY": {
+      "type": "number",
+      "description": "Minimum display APY threshold (%)",
+      "default": 5,
+      "required": true
+    },
+    "limit": {
+      "type": "number",
+      "description": "Maximum number of yield opportunities to fetch",
+      "default": 5,
+      "required": false
+    },
+    "notifyProvider": {
+      "type": "string",
+      "enum": ["discord", "telegram", "webhook"],
+      "description": "Notification channel type",
+      "required": true
+    },
+    "notifyTarget": {
+      "type": "string",
+      "description": "Webhook URL, Discord webhook, or Telegram chat ID",
+      "required": true
+    }
+  }
+}

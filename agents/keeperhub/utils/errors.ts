@@ -6,3 +6,4 @@ export function asKeeperhubError(err: unknown): KeeperhubError {
   const wrapped = new KeeperhubError(message, 500, undefined, err);
   return wrapped;
 }
+
