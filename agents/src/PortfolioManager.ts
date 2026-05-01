@@ -1,4 +1,5 @@
 import type { ReporterAgent, RankedOpportunity } from "./ReporterAgent";
+import { telegram } from "./notifications/TelegramNotifier";
 import { ZeroGMemory }  from "./storage/ZeroGMemory";
 import type { MarketConditions, DecisionSummary, DecisionOutcome } from "./storage/ZeroGMemory";
 import { SnapshotStore } from "./storage/SnapshotStore";
@@ -309,6 +310,7 @@ export class PortfolioManager {
           d.critique = critique;
           if (critique.veto && critique.confidence >= CONFIDENCE_THRESHOLD) {
             console.log(`[Portfolio] Critic VETOED ${opp.pair}: ${critique.reasoning}`);
+            telegram.send(`🚫 Critic vetoed entry\n${opp.pair} · ${opp.chainName}\n\n${critique.reasoning}`);
             break;
           }
           console.log(`[Portfolio] Critic approved ${opp.pair} (conf=${(critique.confidence * 100).toFixed(0)}%): ${critique.reasoning}`);
@@ -463,6 +465,7 @@ export class PortfolioManager {
     this.lastRebalance = Date.now();
     this.persistState();
     console.log(`[Portfolio] opened ${opp.pair} on ${opp.chainName} (${(pct * 100).toFixed(0)}%)`);
+    telegram.send(`✅ Position opened\n${opp.pair} · ${opp.chainName} · ${(pct * 100).toFixed(0)}%\nAPY: ${opp.displayAPY.toFixed(1)}%  effAPY: ${opp.effectiveNetAPY.toFixed(1)}%  RAR7d: ${opp.rar7d.toFixed(2)}\n\n${reason}`);
     return { ok: true, reason: `Opened ${opp.pair} on ${opp.chainName}` };
   }
 
@@ -480,6 +483,8 @@ export class PortfolioManager {
     const proceeds = this.exit(pos, reason);
     this.persistState();
     console.log(`[Portfolio] closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}`);
+    const pnl = proceeds - pos.entryValueUsd;
+    telegram.send(`📤 Position closed\n${pos.pair} · ${pos.chainName}\nProceeds: $${proceeds.toFixed(2)}  PnL: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}  Held: ${pos.hoursHeld.toFixed(1)}h\n\n${reason}`);
     return { ok: true, reason: `Closed ${pos.pair} — proceeds $${proceeds.toFixed(2)}` };
   }
 
@@ -1106,6 +1111,9 @@ export class PortfolioManager {
     // Queue immediately so the user sees the decision right away
     this.pendingActions.set(pending.id, pending);
     console.log(`[Portfolio] Queued ${pending.action} ${pending.pair ?? ""} for approval (id=${pending.id.slice(0, 8)}…)`);
+    const snap = pending.opportunitySnapshot;
+    const snapStr = snap ? `  APY: ${snap.displayAPY.toFixed(1)}%  effAPY: ${snap.effectiveNetAPY.toFixed(1)}%  RAR7d: ${snap.rar7d.toFixed(2)}` : "";
+    telegram.send(`⏳ Awaiting your approval\n${pending.action.toUpperCase()} ${pending.pair ?? ""}${pending.chainName ? " · " + pending.chainName : ""}${snapStr}\n\n${pending.reasoning}`);
     this.persistState();
 
     // Run critique in the background — updates the action when the verdict arrives
@@ -1136,6 +1144,7 @@ export class PortfolioManager {
     };
     this.pendingActions.set(pending.id, pending);
     console.log(`[Portfolio] Queued exit ${pos.pair}@${pos.chainName} for approval: ${reason}`);
+    telegram.send(`⚠️ Exit signal — awaiting your approval\n${pos.pair} · ${pos.chainName}\nHeld: ${((Date.now() - pos.entryTimestamp) / 3_600_000).toFixed(1)}h  Entry APY: ${pos.entryAPY.toFixed(1)}%\n\n${reason}`);
     this.persistState();
   }
 
