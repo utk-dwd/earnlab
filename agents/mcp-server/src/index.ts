@@ -15,6 +15,7 @@ app.use(express.json());
 const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: Server }>();
 
 app.all("/mcp", async (req, res) => {
+  console.log(`[MCP] ${req.method} /mcp | session=${req.headers["mcp-session-id"] ?? "none"} | accept=${req.headers["accept"] ?? "none"}`);
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   const existing = sessionId ? sessions.get(sessionId) : undefined;
 
@@ -28,6 +29,9 @@ app.all("/mcp", async (req, res) => {
   const server = createMcpServer(client);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (sid) => {
+      sessions.set(sid, { transport, server });
+    },
   });
 
   transport.onclose = async () => {
@@ -36,11 +40,6 @@ app.all("/mcp", async (req, res) => {
   };
 
   await server.connect(transport);
-
-  if (transport.sessionId) {
-    sessions.set(transport.sessionId, { transport, server });
-  }
-
   await transport.handleRequest(req, res, req.body);
 });
 
