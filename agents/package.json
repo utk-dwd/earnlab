@@ -6,7 +6,7 @@
     "start": "ts-node src/index.ts",
     "start:mainnet": "NETWORK_FILTER=mainnet ts-node src/index.ts",
     "start:testnet": "NETWORK_FILTER=testnet ts-node src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp src/api/openapi.yaml dist/api/openapi.yaml",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
   },
   "dependencies": {
