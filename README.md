@@ -51,7 +51,18 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │                                                                            │
 │  wagmi v2 + RainbowKit v2 — MetaMask / Base Wallet / WalletConnect        │
 └────────────────────────────────────────────────────────────────────────────┘
-                              ▼  HTTP  (optional execution layer)
+                     ▼  SSE/HTTP  (optional AI agent layer)
+┌────────────────────────────────────────────────────────────────────────────┐
+│  agents/mcp-server/  (MCP server, port 3002)                               │
+│                                                                            │
+│  9 MCP tools: list_yields · get_pool · get_portfolio · get_positions      │
+│               get_trades · get_decisions · check_slippage                  │
+│               get_chains · health_check                                    │
+│                                                                            │
+│  Connect: claude mcp add --transport http earnyld http://localhost:3002/sse│
+│  Clients: Claude Code · Cursor · any MCP-compatible AI agent               │
+└────────────────────────────────────────────────────────────────────────────┘
+                     ▼  HTTP  (optional execution layer)
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  KeeperHub  (external — keeperhub.xyz)                                     │
 │                                                                            │
@@ -66,6 +77,9 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │    1. Monitor and Rebalance (every 15 min)                                 │
 │    2. Discover Entry Opportunities (every 1 hr)                            │
 │    3. Hook Risk Change Alert (webhook trigger)                             │
+│                                                                            │
+│  keeperhub/templates/earnYld-yield-optimizer.json — importable template:  │
+│    Scheduled fetch → threshold check → webhook/Discord/Telegram notify     │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -514,7 +528,7 @@ Two dedicated endpoints expose the agent's decisions as structured data for Keep
 
 #### Workflow file
 
-`keeperhub-workflow.yaml` at the project root contains three complete workflows ready to import into your KeeperHub account:
+`keeperhub-workflow.yaml` at the project root contains three complete workflows ready to import into your KeeperHub account. A second importable template is available at `keeperhub/templates/earnYld-yield-optimizer.json` — a self-contained scheduled notification workflow that requires no additional EarnYld keeper endpoints:
 
 **Workflow 1 — Monitor and Rebalance** (every 15 minutes)
 ```
@@ -565,6 +579,50 @@ LLM Seeker/Critic          Structured run logs
 Risk budget enforcement    Conditional workflow branching
                            onchain read/write contract actions
 ```
+
+---
+
+### MCP Server
+
+> **Let any AI agent talk directly to EarnYld.**
+
+`agents/mcp-server/` is a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes EarnYld's REST API as 9 AI-discoverable tools. Connect Claude Code, Cursor, or any MCP-compatible client and the agent can query yields, inspect portfolio state, and simulate swaps — without writing API calls.
+
+#### Quick start
+
+```bash
+# 1. Start the EarnYld agent (port 3001)
+cd agents && npm start
+
+# 2. Start the MCP server (port 3002)
+cd agents/mcp-server && npm install && npm start
+
+# 3. Connect from Claude Code
+claude mcp add --transport http earnyld http://localhost:3002/sse
+```
+
+#### Tools
+
+| Tool | What it does |
+|---|---|
+| `list_yields` | Ranked yield opportunities (chainId / network / minAPY / limit filters) |
+| `get_pool` | Full data for a single pool by ID |
+| `get_portfolio` | Simulated portfolio summary (cash, PnL, regime) |
+| `get_positions` | Open simulated positions |
+| `get_trades` | Trade execution log |
+| `get_decisions` | LLM Seeker → Critic decision history |
+| `check_slippage` | Simulate a swap and return expected output + slippage % |
+| `get_chains` | All supported chain configs |
+| `health_check` | Agent liveness + pool scan count |
+
+#### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_PORT` | `3002` | Port the MCP server listens on |
+| `EARNYLD_API_URL` | `http://localhost:3001` | EarnYld agent API base URL |
+
+> **Security:** `/sse` and `/messages` have no authentication by default. Do not expose the MCP server to the public internet without a reverse proxy or API key layer.
 
 ---
 
@@ -975,10 +1033,28 @@ The frontend re-exports opportunity and enrichment contract types from `agents/s
 earnYld/
 ├── keeperhub-workflow.yaml               # Three importable KeeperHub workflows
 │                                         #   (Monitor+Rebalance, Entry Discovery, Hook Alert)
+├── keeperhub/
+│   └── templates/
+│       ├── earnYld-yield-optimizer.json  # Standalone KeeperHub notification template
+│       └── README.md                     # Template usage guide
 ├── vercel.json                           # Vercel build config for frontend deployment
 ├── contracts/
 │   └── EarnYldAgentINFT.sol              # ERC-7857-style INFT contract (0G Galileo testnet)
 ├── agents/
+│   ├── mcp-server/                       # MCP server (port 3002)
+│   │   ├── src/
+│   │   │   ├── index.ts                  # Express SSE + /messages endpoints
+│   │   │   ├── server.ts                 # 9 MCP tool definitions + dispatch
+│   │   │   ├── types.ts                  # asToolResult / asToolError helpers
+│   │   │   └── client/
+│   │   │       └── earnlab.ts            # HTTP client for EarnYld agent API
+│   │   └── README.md                     # Quick start + tools reference
+│   ├── keeperhub/                        # Shared KeeperHub utilities
+│   │   ├── types.ts                      # KeeperhubError, EarnlabYield types
+│   │   └── utils/
+│   │       ├── http.ts                   # Fetch wrapper with sanitized error detail
+│   │       ├── validators.ts             # requireBaseUrl, validateTemplateInputs
+│   │       └── errors.ts                 # asKeeperhubError helper
 │   └── src/
 │       ├── index.ts                          # Entry point; initialises ZeroGStorageClient
 │       ├── ReporterAgent.ts                  # Scans chains, enrichment pipeline,
@@ -1065,8 +1141,9 @@ earnYld/
 | `ENRICH_CONCURRENCY` | `5` | Max pools enriched concurrently |
 | `AGENT_API_PORT` | `3001` | REST API port |
 | `NETWORK_FILTER` | `all` | `all` / `mainnet` / `testnet` |
-| `OPENROUTER_API_KEY` | — | Enables LLM decisions; falls back to rules if absent |
-| `LLM_MODEL` | `deepseek/deepseek-chat-v3-0324` | Any OpenRouter model ID |
+| `ZEROG_COMPUTE_API_KEY` | — | Enables LLM decisions via 0G Compute; falls back to rules if absent |
+| `ZG_ROUTER_URL` | `https://router-api-testnet.integratenetwork.work/v1` | 0G Compute router URL (swap for mainnet URL when ready) |
+| `LLM_MODEL` | `qwen/qwen-2.5-7b-instruct` | Model ID available on your 0G Compute network |
 | `REFLECT_INTERVAL_MS` | `3600000` | Reflection cadence (1h default) |
 | `ZEROG_PRIVATE_KEY` | — | Enables 0G persistent memory |
 | `ZEROG_RPC_URL` | `https://evmrpc-testnet.0g.ai` | 0G EVM RPC |
