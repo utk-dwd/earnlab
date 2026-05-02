@@ -4,23 +4,28 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import express from "express";
 
-const MCP_PORT = Number(process.env.MCP_PORT ?? 3002);
+const MCP_PORT = Number(process.env.MCP_PORT) || 3002;
 const EARNYLD_API_URL = process.env.EARNYLD_API_URL ?? "http://localhost:3001";
 
 const app = express();
 
-const client = new EarnlabClient({ baseUrl: EARNYLD_API_URL });
-const server = createMcpServer(client);
-
-// Map sessionId -> transport for SSE
-const transports = new Map<string, SSEServerTransport>();
+// Map sessionId -> { transport, server } so each SSE connection gets its own Server instance
+const sessions = new Map<string, { transport: SSEServerTransport; server: Server }>();
 
 app.get("/sse", async (_req, res) => {
+  const client = new EarnlabClient({ baseUrl: EARNYLD_API_URL });
+  const server = createMcpServer(client);
   const transport = new SSEServerTransport("/messages", res);
-  transports.set(transport.sessionId, transport);
 
-  res.on("close", () => {
-    transports.delete(transport.sessionId);
+  sessions.set(transport.sessionId, { transport, server });
+
+  res.on("close", async () => {
+    sessions.delete(transport.sessionId);
+    try {
+      await server.close();
+    } catch {
+      // ignore close errors
+    }
   });
 
   await server.connect(transport);
@@ -28,12 +33,12 @@ app.get("/sse", async (_req, res) => {
 
 app.post("/messages", async (req, res) => {
   const sessionId = req.query.sessionId as string;
-  const transport = transports.get(sessionId);
-  if (!transport) {
+  const session = sessions.get(sessionId);
+  if (!session) {
     res.status(400).json({ error: "Invalid or expired sessionId" });
     return;
   }
-  await transport.handlePostMessage(req, res);
+  await session.transport.handlePostMessage(req, res);
 });
 
 app.listen(MCP_PORT, () => {
@@ -46,6 +51,12 @@ app.listen(MCP_PORT, () => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   console.log("\n[MCP] Shutting down...");
-  await server.close();
+  for (const { server } of sessions.values()) {
+    try {
+      await server.close();
+    } catch {
+      // ignore
+    }
+  }
   process.exit(0);
 });
