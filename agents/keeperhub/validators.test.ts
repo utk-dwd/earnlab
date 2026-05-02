@@ -18,7 +18,7 @@ describe("validateTemplateInputs", () => {
   });
 
   it("rejects negative minAPY", () => {
-    expect(() => validateTemplateInputs({ ...base, minAPY: -1 })).toThrow("minAPY must be > 0");
+    expect(() => validateTemplateInputs({ ...base, minAPY: -1 })).toThrow("minAPY must be >= 0");
   });
 
   it("rejects missing notifyTarget", () => {

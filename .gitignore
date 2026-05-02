@@ -10,8 +10,6 @@ build/
 out/
 
 # Environment — NEVER commit real credentials
-.env
-.env.local
 .env.*.local
 
 # AXL private key material — regenerate with openssl genpkey
@@ -34,8 +32,8 @@ contracts/typechain-types/
 Thumbs.db
 
 # Editor
-.vscode/
 .idea/
 *.swp
 *.swo
 agents/data/
+config.bat

@@ -17,8 +17,8 @@ export function requireBaseUrl(baseUrl: string): string {
 }
 
 export function validateTemplateInputs(inputs: TemplateInputs): TemplateInputs {
-  if (inputs.minAPY == null || inputs.minAPY <= 0) {
-    throw new KeeperhubError("minAPY must be > 0", 400);
+  if (inputs.minAPY == null || inputs.minAPY < 0) {
+    throw new KeeperhubError("minAPY must be >= 0", 400);
   }
   if (!inputs.notifyTarget) {
     throw new KeeperhubError("notifyTarget is required", 400);
