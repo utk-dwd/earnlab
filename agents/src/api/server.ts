@@ -973,7 +973,8 @@ export function createApiServer(
   // ── Error handler ────────────────────────────────────────────────────────────
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error("[API]", err.message);
-    res.status(500).json({ error: err.message });
+    const safeMessage = err.message.replace(/[\n\r\t]/g, " ").slice(0, 200);
+    res.status(500).json({ error: safeMessage });
   });
 
   return app;
