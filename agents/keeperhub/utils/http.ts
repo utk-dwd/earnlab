@@ -36,7 +36,7 @@ export async function getJson<T>(
     const res = await fetch(url, { ...init, signal: controller.signal });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new KeeperhubError(`HTTP ${res.status}`, res.status, text);
+      throw new KeeperhubError(`HTTP ${res.status}`, res.status, sanitizeErrorDetail(text));
     }
     const text = await res.text();
     try {

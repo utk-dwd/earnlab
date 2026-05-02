@@ -8,6 +8,7 @@ const MCP_PORT = Number(process.env.MCP_PORT) || 3002;
 const EARNYLD_API_URL = process.env.EARNYLD_API_URL ?? "http://localhost:3001";
 
 const app = express();
+app.use(express.json());
 
 // Map sessionId -> { transport, server } so each SSE connection gets its own Server instance
 const sessions = new Map<string, { transport: SSEServerTransport; server: Server }>();

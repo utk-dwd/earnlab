@@ -27,7 +27,7 @@
         "type": "action",
         "config": {
           "actionType": "webhook/send",
-          "url": "{{earnlabBaseUrl}}/yields?limit={{limit}}&minAPY={{minAPY}}&network={{network}}",
+          "url": "{{earnlabBaseUrl}}/yields?limit={{limit}}&minAPY={{minAPY}}&network={{network}}&chainId={{chainId}}",
           "method": "GET",
           "headers": {
             "Content-Type": "application/json"
