@@ -55,12 +55,8 @@ export class LLMClient {
   constructor(memory: ZeroGMemory) {
     this.memory = memory;
     this.client = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey:  process.env.OPENROUTER_API_KEY ?? "",
-      defaultHeaders: {
-        "HTTP-Referer": "https://github.com/utk-dwd/earnlab",
-        "X-Title":      "EarnYld Portfolio Manager",
-      },
+      baseURL: process.env.ZG_ROUTER_URL ?? "https://router-api-testnet.integratenetwork.work/v1",
+      apiKey:  process.env.ZEROG_COMPUTE_API_KEY ?? "",
     });
   }
 

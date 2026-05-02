@@ -40,20 +40,16 @@ export class ReflectionAgent {
     private portfolio: PortfolioManager,
   ) {
     // Set enabled immediately from key presence so SSE history sends correct state
-    this.enabled = !!process.env.OPENROUTER_API_KEY;
+    this.enabled = !!process.env.ZEROG_COMPUTE_API_KEY;
     this.client = new OpenAI({
-      baseURL: "https://openrouter.ai/api/v1",
-      apiKey:  process.env.OPENROUTER_API_KEY ?? "",
-      defaultHeaders: {
-        "HTTP-Referer": "https://github.com/utk-dwd/earnlab",
-        "X-Title":      "EarnYld Reflection Agent",
-      },
+      baseURL: process.env.ZG_ROUTER_URL ?? "https://router-api-testnet.integratenetwork.work/v1",
+      apiKey:  process.env.ZEROG_COMPUTE_API_KEY ?? "",
     });
   }
 
   async start(): Promise<void> {
-    if (!process.env.OPENROUTER_API_KEY) {
-      console.log("[Reflection] OPENROUTER_API_KEY not set — disabled");
+    if (!process.env.ZEROG_COMPUTE_API_KEY) {
+      console.log("[Reflection] ZEROG_COMPUTE_API_KEY not set — disabled");
       return;
     }
     await this.memory.init();

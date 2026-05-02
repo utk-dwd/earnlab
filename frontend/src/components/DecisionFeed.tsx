@@ -195,7 +195,7 @@ export function DecisionFeed({ apiUrl }: Props) {
 
       {llmEnabled === false && (
         <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-3 text-xs text-amber-700 dark:text-amber-400">
-          Set <code className="font-mono bg-amber-100 dark:bg-amber-900/40 px-1 rounded">OPENROUTER_API_KEY</code> to enable LLM decisions.
+          Set <code className="font-mono bg-amber-100 dark:bg-amber-900/40 px-1 rounded">ZEROG_COMPUTE_API_KEY</code> to enable LLM decisions.
         </div>
       )}
 

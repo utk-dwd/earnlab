@@ -197,13 +197,13 @@ export class PortfolioManager {
     // Initialise 0G memory (gracefully falls back to in-memory)
     await this.memory.init();
 
-    // Wire up LLM client if OPENROUTER_API_KEY is set
-    if (process.env.OPENROUTER_API_KEY) {
+    // Wire up LLM client if ZEROG_COMPUTE_API_KEY is set
+    if (process.env.ZEROG_COMPUTE_API_KEY) {
       this.llm      = new LLMClient(this.memory);
       this.llmReady = true;
       console.log(`[Portfolio] LLM enabled — model: ${process.env.LLM_MODEL ?? "deepseek/deepseek-chat-v3-0324"}`);
     } else {
-      console.log("[Portfolio] OPENROUTER_API_KEY not set — running rule-based mode");
+      console.log("[Portfolio] ZEROG_COMPUTE_API_KEY not set — running rule-based mode");
     }
 
     console.log(`[Portfolio] Starting — $${INITIAL_CAPITAL_USD.toLocaleString()} mock capital`);

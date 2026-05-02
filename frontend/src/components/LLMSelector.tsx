@@ -127,7 +127,7 @@ export function LLMSelector({ onClose }: { onClose: () => void }) {
             <div>
               <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">🤖 Choose LLM</h2>
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                Powered by <span className="font-semibold text-indigo-600 dark:text-indigo-400">OpenRouter</span>
+                Powered by <span className="font-semibold text-indigo-600 dark:text-indigo-400">0G Compute</span>
               </p>
             </div>
             <button
@@ -193,7 +193,7 @@ export function LLMSelector({ onClose }: { onClose: () => void }) {
             {useCustom && (
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider block">
-                  Custom OpenRouter Model ID
+                  Custom 0G Compute Model ID
                 </label>
                 <input
                   type="text"
@@ -204,7 +204,7 @@ export function LLMSelector({ onClose }: { onClose: () => void }) {
                   className="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
                 <p className="text-[11px] text-gray-400 dark:text-gray-500">
-                  Any model listed at openrouter.ai/models works here.
+                  Any model available via the 0G Compute network works here.
                 </p>
               </div>
             )}
