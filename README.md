@@ -59,7 +59,7 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │               get_trades · get_decisions · check_slippage                  │
 │               get_chains · health_check                                    │
 │                                                                            │
-│  Connect: claude mcp add --transport sse earnyld http://localhost:3002/sse│
+│  Connect: claude mcp add --transport http earnyld http://localhost:3002/mcp│
 │  Clients: Claude Code · Cursor · any MCP-compatible AI agent               │
 └────────────────────────────────────────────────────────────────────────────┘
                      ▼  HTTP  (optional execution layer)
@@ -598,7 +598,7 @@ cd agents && npm start
 cd agents/mcp-server && npm install && npm start
 
 # 3. Connect from Claude Code
-claude mcp add --transport sse earnyld http://localhost:3002/sse
+claude mcp add --transport http earnyld http://localhost:3002/mcp
 ```
 
 #### Tools
@@ -622,7 +622,7 @@ claude mcp add --transport sse earnyld http://localhost:3002/sse
 | `MCP_PORT` | `3002` | Port the MCP server listens on |
 | `EARNYLD_API_URL` | `http://localhost:3001` | EarnYld agent API base URL |
 
-> **Security:** `/sse` and `/messages` have no authentication by default. Do not expose the MCP server to the public internet without a reverse proxy or API key layer.
+> **Security:** The `/mcp` endpoint has no authentication by default. Do not expose the MCP server to the public internet without a reverse proxy or API key layer.
 
 ---
 
@@ -1043,7 +1043,7 @@ earnYld/
 ├── agents/
 │   ├── mcp-server/                       # MCP server (port 3002)
 │   │   ├── src/
-│   │   │   ├── index.ts                  # Express SSE + /messages endpoints
+│   │   │   ├── index.ts                  # Streamable HTTP POST /mcp endpoint
 │   │   │   ├── server.ts                 # 9 MCP tool definitions + dispatch
 │   │   │   ├── types.ts                  # asToolResult / asToolError helpers
 │   │   │   └── client/

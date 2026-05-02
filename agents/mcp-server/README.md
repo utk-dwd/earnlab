@@ -11,7 +11,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that ex
 
 ## Security Warning
 
-**The MCP server runs without authentication by default.** The `/sse` and `/messages` endpoints are open to anyone who can reach the server. This is acceptable for local development but **must not be exposed to the public internet without an authentication layer** (e.g., reverse proxy with API key validation, VPN, or cloud IAP).
+**The MCP server runs without authentication by default.** The `/mcp` endpoint is open to anyone who can reach the server. This is acceptable for local development but **must not be exposed to the public internet without an authentication layer** (e.g., reverse proxy with API key validation, VPN, or cloud IAP).
 
 Never expose the MCP server directly to untrusted networks — any client that can connect can invoke all EarnYld tools including `check_slippage` and read portfolio data.
 

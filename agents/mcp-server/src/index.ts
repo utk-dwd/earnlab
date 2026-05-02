@@ -15,7 +15,6 @@ app.use(express.json());
 const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: Server }>();
 
 app.all("/mcp", async (req, res) => {
-  console.log(`[MCP] ${req.method} /mcp | session=${req.headers["mcp-session-id"] ?? "none"} | accept=${req.headers["accept"] ?? "none"}`);
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   const existing = sessionId ? sessions.get(sessionId) : undefined;
 
