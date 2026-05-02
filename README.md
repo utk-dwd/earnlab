@@ -59,7 +59,7 @@ Built for [ETHGlobal](https://ethglobal.com/) — EarnYld v2.
 │               get_trades · get_decisions · check_slippage                  │
 │               get_chains · health_check                                    │
 │                                                                            │
-│  Connect: claude mcp add --transport http earnyld http://localhost:3002/sse│
+│  Connect: claude mcp add --transport sse earnyld http://localhost:3002/sse│
 │  Clients: Claude Code · Cursor · any MCP-compatible AI agent               │
 └────────────────────────────────────────────────────────────────────────────┘
                      ▼  HTTP  (optional execution layer)
@@ -598,7 +598,7 @@ cd agents && npm start
 cd agents/mcp-server && npm install && npm start
 
 # 3. Connect from Claude Code
-claude mcp add --transport http earnyld http://localhost:3002/sse
+claude mcp add --transport sse earnyld http://localhost:3002/sse
 ```
 
 #### Tools

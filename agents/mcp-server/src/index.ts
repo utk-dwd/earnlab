@@ -1,8 +1,9 @@
+import { randomUUID } from "crypto";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
 import { createMcpServer } from "./server.js";
 import { EarnlabClient } from "./client/earnlab.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import express from "express";
 
 const MCP_PORT = Number(process.env.MCP_PORT) || 3002;
 const EARNYLD_API_URL = process.env.EARNYLD_API_URL ?? "http://localhost:3001";
@@ -10,58 +11,49 @@ const EARNYLD_API_URL = process.env.EARNYLD_API_URL ?? "http://localhost:3001";
 const app = express();
 app.use(express.json());
 
-// Map sessionId -> { transport, server } so each SSE connection gets its own Server instance
-const sessions = new Map<string, { transport: SSEServerTransport; server: Server }>();
+// sessionId -> { transport, server }
+const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: Server }>();
 
-app.get("/sse", async (_req, res) => {
+app.all("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  const existing = sessionId ? sessions.get(sessionId) : undefined;
+
+  if (existing) {
+    await existing.transport.handleRequest(req, res, req.body);
+    return;
+  }
+
+  // New session — only allowed on initialize (POST without session ID)
   const client = new EarnlabClient({ baseUrl: EARNYLD_API_URL });
   const server = createMcpServer(client);
-  const transport = new SSEServerTransport("/messages", res);
-
-  sessions.set(transport.sessionId, { transport, server });
-
-  res.on("close", async () => {
-    sessions.delete(transport.sessionId);
-    try {
-      await server.close();
-    } catch {
-      // ignore close errors
-    }
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
   });
 
-  await server.connect(transport);
-});
+  transport.onclose = async () => {
+    if (transport.sessionId) sessions.delete(transport.sessionId);
+    try { await server.close(); } catch { /* ignore */ }
+  };
 
-app.post("/messages", async (req, res) => {
-  const sessionId = req.query.sessionId as string;
-  if (!sessionId || sessionId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
-    res.status(400).json({ error: "Invalid sessionId format" });
-    return;
+  await server.connect(transport);
+
+  if (transport.sessionId) {
+    sessions.set(transport.sessionId, { transport, server });
   }
-  const session = sessions.get(sessionId);
-  if (!session) {
-    res.status(400).json({ error: "Invalid or expired sessionId" });
-    return;
-  }
-  await session.transport.handlePostMessage(req, res);
+
+  await transport.handleRequest(req, res, req.body);
 });
 
 app.listen(MCP_PORT, () => {
   console.log(`[MCP] EarnYld MCP server listening on http://localhost:${MCP_PORT}`);
-  console.log(`[MCP] SSE endpoint: http://localhost:${MCP_PORT}/sse`);
-  console.log(`[MCP] Messages endpoint: http://localhost:${MCP_PORT}/messages?sessionId=<id>`);
+  console.log(`[MCP] Endpoint: http://localhost:${MCP_PORT}/mcp`);
   console.log(`[MCP] Proxying to EarnYld API at ${EARNYLD_API_URL}`);
+  console.log(`[MCP] Register with: claude mcp add --transport http earnyld http://localhost:${MCP_PORT}/mcp`);
 });
 
-// Graceful shutdown
 process.on("SIGINT", async () => {
-  console.log("\n[MCP] Shutting down...");
   for (const { server } of sessions.values()) {
-    try {
-      await server.close();
-    } catch {
-      // ignore
-    }
+    try { await server.close(); } catch { /* ignore */ }
   }
   process.exit(0);
 });

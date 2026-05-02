@@ -5,7 +5,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that ex
 ## Features
 
 - **9 MCP tools** covering yields, portfolio, positions, trades, decisions, slippage checks, chains, and health
-- **HTTP/SSE transport** — connect from Claude, Cursor, or any MCP client
+- **Streamable HTTP transport** (`POST /mcp`) — compatible with Claude Code, Cursor, and any MCP 2025-03-26 client
 - **Thin proxy** to the EarnYld agent API (port 3001 by default)
 - **Zero state** — no secrets stored, no database
 
@@ -51,7 +51,7 @@ The server starts on **port 3002** by default.
 ## Connect from Claude Code
 
 ```bash
-claude mcp add --transport http earnyld http://localhost:3002/sse
+claude mcp add --transport http earnyld http://localhost:3002/mcp
 ```
 
 Then run `/mcp` inside Claude Code and select the **earnyld** server.
@@ -83,7 +83,7 @@ npm test        # run vitest suite
 ```
 AI Agent (Claude)
     → MCP client
-    → MCP Server (port 3002, SSE)
+    → MCP Server (port 3002, Streamable HTTP POST /mcp)
     → HTTP GET/POST → EarnYld Agent API (port 3001)
     → JSON response → MCP tool result → AI Agent
 ```
