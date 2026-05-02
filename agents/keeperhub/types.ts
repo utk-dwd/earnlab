@@ -56,7 +56,7 @@ export class KeeperhubError extends Error {
   public cause?: unknown;
 
   constructor(message: string, status = 500, details?: string, cause?: unknown) {
-    super(message);
+    super(message, { cause });
     this.status = status;
     this.details = details;
     this.cause = cause;

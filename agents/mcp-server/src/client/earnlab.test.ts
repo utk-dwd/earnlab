@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { EarnlabClient, asToolResult, asToolError } from "./earnlab.js";
+import { EarnlabClient } from "./earnlab.js";
+import { asToolResult, asToolError } from "../types.js";
 
 describe("EarnlabClient", () => {
   const originalFetch = globalThis.fetch;
@@ -87,8 +88,9 @@ describe("asToolResult", () => {
   it("wraps data in MCP content format", () => {
     const result = asToolResult({ foo: "bar" });
     expect(result.content).toHaveLength(1);
-    expect(result.content[0].type).toBe("text");
-    expect(JSON.parse(result.content[0].text)).toEqual({ foo: "bar" });
+    const block = result.content[0] as { type: "text"; text: string };
+    expect(block.type).toBe("text");
+    expect(JSON.parse(block.text)).toEqual({ foo: "bar" });
     expect(result.isError).toBeUndefined();
   });
 });
@@ -97,7 +99,8 @@ describe("asToolError", () => {
   it("wraps error in MCP error format", () => {
     const result = asToolError("Something went wrong");
     expect(result.content).toHaveLength(1);
-    expect(result.content[0].text).toBe("Error: Something went wrong");
+    const block = result.content[0] as { type: "text"; text: string };
+    expect(block.text).toBe("Error: Something went wrong");
     expect(result.isError).toBe(true);
   });
 });

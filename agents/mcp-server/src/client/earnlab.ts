@@ -1,4 +1,4 @@
-import { EarnlabClientConfig, ToolResult } from "../types.js";
+import { EarnlabClientConfig } from "../types.js";
 
 export class EarnlabClient {
   private baseUrl: string;
@@ -35,7 +35,7 @@ export class EarnlabClient {
         throw new Error("EarnYld API timed out");
       }
       if (err.message?.includes("fetch failed") || err.code === "ECONNREFUSED") {
-        throw new Error(`EarnYld API unreachable at ${this.baseUrl}`);
+        throw new Error("EarnYld API unreachable");
       }
       throw err;
     } finally {
@@ -52,15 +52,4 @@ export class EarnlabClient {
   }
 }
 
-export function asToolResult(data: unknown): ToolResult {
-  return {
-    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-  };
-}
 
-export function asToolError(message: string): ToolResult {
-  return {
-    content: [{ type: "text", text: `Error: ${message}` }],
-    isError: true,
-  };
-}

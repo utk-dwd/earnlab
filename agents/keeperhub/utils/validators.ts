@@ -1,4 +1,4 @@
-import { KeeperhubError, TemplateInputs } from "../types";
+import { KeeperhubError, TemplateInputs } from "../types.js";
 
 export function requireBaseUrl(baseUrl: string): string {
   if (!baseUrl) throw new KeeperhubError("earnlabBaseUrl is required", 400);
@@ -17,7 +17,7 @@ export function requireBaseUrl(baseUrl: string): string {
 }
 
 export function validateTemplateInputs(inputs: TemplateInputs): TemplateInputs {
-  if (!inputs.minAPY || inputs.minAPY <= 0) {
+  if (inputs.minAPY == null || inputs.minAPY <= 0) {
     throw new KeeperhubError("minAPY must be > 0", 400);
   }
   if (!inputs.notifyTarget) {

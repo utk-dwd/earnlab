@@ -1,11 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { EarnlabClient, asToolResult, asToolError } from "./client/earnlab.js";
+import { EarnlabClient } from "./client/earnlab.js";
+import { asToolResult, asToolError } from "./types.js";
 
 const YIELDS_TOOL: Tool = {
   name: "list_yields",
@@ -30,7 +30,6 @@ const YIELDS_TOOL: Tool = {
       limit: {
         type: "number",
         description: "Maximum number of results (1-100)",
-        default: 20,
       },
     },
   },
@@ -87,7 +86,6 @@ const DECISIONS_TOOL: Tool = {
       limit: {
         type: "number",
         description: "Max decisions to return (1-50)",
-        default: 20,
       },
     },
   },
@@ -203,28 +201,28 @@ export function createMcpServer(client: EarnlabClient): Server {
             limit: args.limit ?? 20,
           });
           const data = await client.request(`/yields${qs}`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_pool": {
-          const poolId = (args.poolId as string) ?? "";
+          const poolId = String(args.poolId ?? "");
           const data = await client.request(`/yields/${encodeURIComponent(poolId)}`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_portfolio": {
           const data = await client.request(`/portfolio`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_positions": {
           const data = await client.request(`/portfolio/positions`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_trades": {
           const data = await client.request(`/portfolio/trades`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_decisions": {
@@ -232,7 +230,7 @@ export function createMcpServer(client: EarnlabClient): Server {
             limit: args.limit ?? 20,
           });
           const data = await client.request(`/portfolio/decisions${qs}`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "check_slippage": {
@@ -248,33 +246,26 @@ export function createMcpServer(client: EarnlabClient): Server {
               inputTokenDecimals: args.inputTokenDecimals ?? 18,
             }),
           });
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "get_chains": {
           const data = await client.request(`/chains`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         case "health_check": {
           const data = await client.request(`/health`);
-          return asToolResult(data) as any;
+          return asToolResult(data);
         }
 
         default:
-          return asToolError(`Unknown tool: ${name}`) as any;
+          return asToolError(`Unknown tool: ${name}`);
       }
     } catch (err: any) {
-      return asToolError(err.message ?? String(err)) as any;
+      return asToolError(err.message ?? String(err));
     }
   });
 
   return server;
-}
-
-export async function startStdioServer(): Promise<void> {
-  const client = new EarnlabClient();
-  const server = createMcpServer(client);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
 }

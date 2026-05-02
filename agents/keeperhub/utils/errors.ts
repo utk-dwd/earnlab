@@ -1,4 +1,4 @@
-import { KeeperhubError } from "../types";
+import { KeeperhubError } from "../types.js";
 
 export function asKeeperhubError(err: unknown): KeeperhubError {
   if (err instanceof KeeperhubError) return err;

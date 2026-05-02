@@ -1,10 +1,13 @@
-import { KeeperhubError } from "../types";
+import { KeeperhubError } from "../types.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_ERROR_DETAIL_CHARS = 500;
 
 function sanitizeErrorDetail(text: string): string {
-  const stripped = text.replace(/[\n\r\t]/g, " ");
+  // Strip ANSI escape codes and control characters
+  const stripped = text
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/[\n\r\t]/g, " ");
   if (stripped.length <= MAX_ERROR_DETAIL_CHARS) return stripped;
   return `${stripped.slice(0, MAX_ERROR_DETAIL_CHARS - 3)}...`;
 }
