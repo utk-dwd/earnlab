@@ -1,8 +1,9 @@
-export type EarnlabNetwork = "mainnet" | "testnet" | "all";
+export type EarnlabNetworkFilter = "mainnet" | "testnet" | "all";
+export type EarnlabNetwork = "mainnet" | "testnet";
 
 export interface EarnlabYieldsQuery {
   chainId?: number;
-  network?: EarnlabNetwork;
+  network?: EarnlabNetworkFilter;
   minAPY?: number;
   limit?: number;
 }
@@ -35,7 +36,7 @@ export interface EarnlabPortfolioResponse extends EarnlabPortfolioSummary {}
 export interface TemplateInputs {
   earnlabBaseUrl: string;
   chainId?: number;
-  network?: EarnlabNetwork;
+  network?: EarnlabNetworkFilter;
   minAPY: number;
   maxRiskScore?: number;
   limit?: number;
@@ -53,7 +54,7 @@ export interface KeeperhubTemplate {
 export class KeeperhubError extends Error {
   public status: number;
   public details?: string;
-  public cause?: unknown;
+  public override cause?: unknown;
 
   constructor(message: string, status = 500, details?: string, cause?: unknown) {
     super(message, { cause });

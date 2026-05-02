@@ -1,6 +1,6 @@
 {
   "name": "EarnYld Yield Optimizer",
-  "description": "Periodically fetch top Uniswap v4 yield opportunities from EarnYld and notify via Discord, Telegram, or webhook.",
+  "description": "Periodically fetch top Uniswap v4 yield opportunities from EarnYld and notify via Discord, Telegram, or webhook. Note: notifyProvider is metadata only — all notifications use the Webhook plugin. Set notifyTarget to a Discord webhook URL, Telegram bot webhook URL, or any HTTPS endpoint.",
   "nodes": [
     {
       "id": "trigger-schedule",
@@ -27,7 +27,7 @@
         "type": "action",
         "config": {
           "actionType": "webhook/send",
-          "url": "{{earnlabBaseUrl}}/yields?limit={{limit}}&minAPY={{minAPY}}&chainId={{chainId}}",
+          "url": "{{earnlabBaseUrl}}/yields?limit={{limit}}&minAPY={{minAPY}}&network={{network}}",
           "method": "GET",
           "headers": {
             "Content-Type": "application/json"

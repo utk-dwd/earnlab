@@ -206,6 +206,9 @@ export function createMcpServer(client: EarnlabClient): Server {
 
         case "get_pool": {
           const poolId = String(args.poolId ?? "");
+          if (!poolId) {
+            return asToolError("poolId is required");
+          }
           const data = await client.request(`/yields/${encodeURIComponent(poolId)}`);
           return asToolResult(data);
         }
@@ -234,6 +237,10 @@ export function createMcpServer(client: EarnlabClient): Server {
         }
 
         case "check_slippage": {
+          const amountInRaw = String(args.amountIn ?? "");
+          if (!/^\d+$/.test(amountInRaw)) {
+            return asToolError("amountIn must be a non-negative integer string (e.g. \"1000000000000000000\")");
+          }
           const data = await client.request(`/slippage/check`, {
             method: "POST",
             body: JSON.stringify({

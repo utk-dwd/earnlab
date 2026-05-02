@@ -2,6 +2,7 @@
   "name": "earnyld-mcp-server",
   "version": "1.0.0",
   "description": "MCP server exposing EarnYld yield optimization APIs to AI agents",
+  "type": "module",
   "private": true,
   "scripts": {
     "start": "tsx src/index.ts",

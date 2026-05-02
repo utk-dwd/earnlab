@@ -33,6 +33,10 @@ app.get("/sse", async (_req, res) => {
 
 app.post("/messages", async (req, res) => {
   const sessionId = req.query.sessionId as string;
+  if (!sessionId || sessionId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+    res.status(400).json({ error: "Invalid sessionId format" });
+    return;
+  }
   const session = sessions.get(sessionId);
   if (!session) {
     res.status(400).json({ error: "Invalid or expired sessionId" });
