@@ -683,25 +683,21 @@ A persistent card at the top of the main dashboard column shows the app wallet's
 
 ### Runtime LLM model switching
 
-A **🤖 Choose LLM** button in the header opens a model-selection panel. The dropdown lists 18 models across 6 providers, grouped by provider with colour-coded badges:
+A **🤖 Choose LLM** button in the header opens a model-selection panel. The dropdown lists models available on the 0G Compute network, grouped by provider:
 
-| Provider | Models available |
+| Environment | Available models |
 |---|---|
-| DeepSeek | V3 (default), R1, R1 Distill |
-| OpenAI | GPT-4o, GPT-4o Mini, GPT-4 Turbo, o1 Mini |
-| Anthropic | Claude 3.5 Sonnet, Claude 3.5 Haiku, Claude 3 Opus |
-| Meta | Llama 3.1 405B, Llama 3.1 70B, Llama 3.3 70B |
-| Mistral | Mistral Large, Mistral Small |
-| Google | Gemini 1.5 Pro, Gemini 1.5 Flash, Gemini 2.0 Flash |
+| Testnet (`router-api-testnet.integratenetwork.work`) | `qwen/qwen-2.5-7b-instruct` |
+| Mainnet (`router-api.0g.ai`) | DeepSeek V3, Qwen3 VL, GLM-5, GLM-5.1 and more |
 
-A **"Enter a custom model ID"** toggle accepts any model available at openrouter.ai/models.
+A **"Enter a custom model ID"** toggle accepts any model ID available on 0G Compute (`GET /v1/models`).
 
 Clicking **Apply** calls `POST /settings/llm`. The model change takes effect on the next LLM invocation — no agent restart required. Both the Seeker/Critic (`LLMClient`) and the Reflection Agent call `getModel()` at call time from a shared `LLMConfig` singleton.
 
 The catalogue is hardcoded in the frontend so the dropdown is always populated regardless of whether the agent API is reachable.
 
 ### LLM pipeline — Seeker → Critic → Executor
-When `OPENROUTER_API_KEY` is set, every 5-minute cycle runs two sequential LLM calls:
+When `ZEROG_COMPUTE_API_KEY` is set, every 5-minute cycle runs two sequential LLM calls:
 
 1. **Seeker** — reviews ranked opportunities, portfolio state, token exposure, regime label, risk budget status, portfolio optimisation output, scorecard composites, and past outcomes from 0G memory. Returns structured JSON decisions.
 2. **Critic** — receives the Seeker's proposal and argues *against* it: checks IL risk, weak RAR, adverse selection, stress test downside score, scorecard composite threshold, price momentum, TVL red flags, overconcentration, and gas break-even. Returns `{ veto, confidence, reasoning }`.
@@ -844,8 +840,11 @@ Minimum required to run in testnet-only, rule-based mode:
 # Optional but recommended — paid RPC endpoints reduce rate-limit failures
 ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 
-# Enable LLM-driven decisions (falls back to rules if absent)
-OPENROUTER_API_KEY=sk-or-v1-...
+# Enable LLM-driven decisions via 0G Compute (falls back to rules if absent)
+ZEROG_COMPUTE_API_KEY=sk-...          # from pc.0g.ai (mainnet) or pc.testnet.0g.ai (testnet)
+ZG_ROUTER_URL=https://router-api-testnet.integratenetwork.work/v1  # testnet
+# ZG_ROUTER_URL=https://router-api.0g.ai/v1                        # mainnet
+LLM_MODEL=qwen/qwen-2.5-7b-instruct  # testnet; use deepseek/deepseek-chat-v3-0324 on mainnet
 
 # Enable 0G persistent memory (falls back to in-memory if absent)
 ZEROG_PRIVATE_KEY=0x...
@@ -1003,7 +1002,7 @@ earnYld/
 │       │   ├── PortfolioOptimizer.ts         # Marginal-Sharpe greedy allocator
 │       │   └── RiskBudget.ts                 # Portfolio-level constraint checks
 │       ├── llm/
-│       │   ├── LLMClient.ts                  # Seeker + Critic LLM calls (OpenRouter)
+│       │   ├── LLMClient.ts                  # Seeker + Critic LLM calls (0G Compute)
 │       │   ├── ReflectionAgent.ts            # Hourly streaming reflection
 │       │   └── LLMConfig.ts                  # Mutable model singleton (getModel/setModel)
 │       ├── notifications/
@@ -1048,7 +1047,7 @@ earnYld/
         │   ├── SwapModal.tsx                 # Token swap (Uniswap V3 + 0G JAINE DEX)
         │   ├── AppWalletBalances.tsx         # Live app wallet balance widget (all testnets)
         │   ├── AgentINFTPanel.tsx            # Strategy agent INFT — mint/clone/authorize/transfer
-        │   └── LLMSelector.tsx              # OpenRouter model picker (18 models, 6 providers)
+        │   └── LLMSelector.tsx              # 0G Compute model picker (testnet/mainnet catalogue)
         ├── lib/
         │   └── wagmiConfig.ts                # wagmi + RainbowKit chain configuration
         └── types/
