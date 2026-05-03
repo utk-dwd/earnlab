@@ -186,11 +186,16 @@ export function createApiServer(
   });
 
   // ── Serve OpenAPI spec as JSON ──────────────────────────────────────────────
-  // Try compiled path first (dist/api/), fall back to source path (src/api/)
-  // so it works in both Railway (compiled) and ts-node (local dev) without a cp step.
+  // Search in priority order so this works in every environment:
+  //   1. dist/api/openapi.yaml  — compiled output (after cp in build script)
+  //   2. src/api/openapi.yaml   — relative to __dirname (ts-node, local dev)
+  //   3. {cwd}/src/api/openapi.yaml — absolute from process root (Railway/nixpacks)
+  //   4. {cwd}/dist/api/openapi.yaml — compiled, absolute from process root
   const _specCandidates = [
     path.join(__dirname, "openapi.yaml"),
     path.join(__dirname, "..", "..", "src", "api", "openapi.yaml"),
+    path.join(process.cwd(), "src", "api", "openapi.yaml"),
+    path.join(process.cwd(), "dist", "api", "openapi.yaml"),
   ];
   const _specPath = _specCandidates.find(p => fs.existsSync(p));
   const _openApiDoc = _specPath
