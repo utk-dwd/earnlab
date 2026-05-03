@@ -3,7 +3,18 @@ import cors from "cors";
 import path from "path";
 import yaml from "js-yaml";
 import fs from "fs";
-import openApiSpec from "./openapi-spec.json";
+// Load spec from dist/api/ (Docker) or src/api/ (Nixpacks preserves source at runtime)
+function loadOpenApiSpec(): Record<string, unknown> {
+  const candidates = [
+    path.join(__dirname, "openapi-spec.json"),
+    path.join(process.cwd(), "src", "api", "openapi-spec.json"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, unknown>;
+  }
+  throw new Error("openapi-spec.json not found. Tried: " + candidates.join(", "));
+}
+const openApiSpec = loadOpenApiSpec();
 import type { ReporterAgent }    from "../ReporterAgent";
 import type { PortfolioManager } from "../PortfolioManager";
 import type { ReflectionAgent }  from "../llm/ReflectionAgent";
