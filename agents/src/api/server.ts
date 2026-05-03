@@ -3,6 +3,7 @@ import cors from "cors";
 import path from "path";
 import yaml from "js-yaml";
 import fs from "fs";
+import openApiSpec from "./openapi-spec.json";
 import type { ReporterAgent }    from "../ReporterAgent";
 import type { PortfolioManager } from "../PortfolioManager";
 import type { ReflectionAgent }  from "../llm/ReflectionAgent";
@@ -186,28 +187,8 @@ export function createApiServer(
   });
 
   // ── Serve OpenAPI spec as JSON ──────────────────────────────────────────────
-  // Search in priority order so this works in every environment:
-  //   1. dist/api/openapi.yaml  — compiled output (after cp in build script)
-  //   2. src/api/openapi.yaml   — relative to __dirname (ts-node, local dev)
-  //   3. {cwd}/src/api/openapi.yaml — absolute from process root (Railway/nixpacks)
-  //   4. {cwd}/dist/api/openapi.yaml — compiled, absolute from process root
-  const _specCandidates = [
-    path.join(__dirname, "openapi.yaml"),
-    path.join(__dirname, "..", "..", "src", "api", "openapi.yaml"),
-    path.join(process.cwd(), "src", "api", "openapi.yaml"),
-    path.join(process.cwd(), "dist", "api", "openapi.yaml"),
-  ];
-  const _specPath = _specCandidates.find(p => fs.existsSync(p));
-  const _openApiDoc = _specPath
-    ? yaml.load(fs.readFileSync(_specPath, "utf-8"))
-    : null;
-
   app.get("/openapi.json", (_req, res) => {
-    if (!_openApiDoc) {
-      res.status(500).json({ error: "Could not load OpenAPI spec" });
-      return;
-    }
-    res.json(_openApiDoc);
+    res.json(openApiSpec);
   });
 
   // ── GET /yields ─────────────────────────────────────────────────────────────
