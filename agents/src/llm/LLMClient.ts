@@ -214,9 +214,13 @@ function buildContext(
 
 // ─── Response parser ──────────────────────────────────────────────────────────
 
+function stripFences(raw: string): string {
+  return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+}
+
 function parseCycle(raw: string): Omit<DecisionCycle, "timestamp" | "rawTokens"> {
   try {
-    const parsed    = JSON.parse(raw);
+    const parsed    = JSON.parse(stripFences(raw));
     const decisions: AgentDecision[] = (Array.isArray(parsed.decisions) ? parsed.decisions : [])
       .map((d: any): AgentDecision => ({
         action:         validateAction(d.action),
@@ -488,7 +492,7 @@ function buildExitCritiqueContext(
 
 function parseCritique(raw: string): CritiqueResult {
   try {
-    const p = JSON.parse(raw);
+    const p = JSON.parse(stripFences(raw));
     return {
       veto:       Boolean(p.veto),
       confidence: Math.max(0, Math.min(1, Number(p.confidence ?? 0))),
