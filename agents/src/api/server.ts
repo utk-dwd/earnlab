@@ -186,14 +186,23 @@ export function createApiServer(
   });
 
   // ── Serve OpenAPI spec as JSON ──────────────────────────────────────────────
+  // Try compiled path first (dist/api/), fall back to source path (src/api/)
+  // so it works in both Railway (compiled) and ts-node (local dev) without a cp step.
+  const _specCandidates = [
+    path.join(__dirname, "openapi.yaml"),
+    path.join(__dirname, "..", "..", "src", "api", "openapi.yaml"),
+  ];
+  const _specPath = _specCandidates.find(p => fs.existsSync(p));
+  const _openApiDoc = _specPath
+    ? yaml.load(fs.readFileSync(_specPath, "utf-8"))
+    : null;
+
   app.get("/openapi.json", (_req, res) => {
-    const specPath = path.join(__dirname, "openapi.yaml");
-    try {
-      const doc = yaml.load(fs.readFileSync(specPath, "utf-8"));
-      res.json(doc);
-    } catch {
+    if (!_openApiDoc) {
       res.status(500).json({ error: "Could not load OpenAPI spec" });
+      return;
     }
+    res.json(_openApiDoc);
   });
 
   // ── GET /yields ─────────────────────────────────────────────────────────────
