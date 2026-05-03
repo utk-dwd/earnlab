@@ -903,7 +903,7 @@ export function createApiServer(
         const explorerUrl = `https://chainscan-galileo.0g.ai/token/${process.env.INFT_CONTRACT_ADDRESS}/instance/${s.tokenId}`;
         return { onChain: s, metadata, explorerUrl };
       }));
-      res.json({ owner, agents: records });
+      res.json({ owner, agents: records, contractConfigured: !!process.env.INFT_CONTRACT_ADDRESS });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

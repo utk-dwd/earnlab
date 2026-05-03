@@ -5,9 +5,9 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "start": "node init && tsx src/index.ts",
+    "dev": "node init && tsx watch src/index.ts",
+    "build": "node init && tsc",
     "test": "vitest run",
     "test:watch": "vitest"
   },

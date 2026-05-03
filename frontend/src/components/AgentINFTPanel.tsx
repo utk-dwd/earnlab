@@ -418,7 +418,7 @@ export function AgentINFTPanel({ onClose }: { onClose: () => void }) {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? "Fetch failed");
       setAgents(data.agents ?? []);
-      if (data.agents.length === 0 && !process.env.INFT_CONTRACT_ADDRESS) {
+      if (data.agents.length === 0 && !data.contractConfigured) {
         setDemoMode(true);
       }
     } catch (e: any) {

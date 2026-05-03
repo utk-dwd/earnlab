@@ -3,11 +3,11 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "start": "ts-node src/index.ts",
-    "start:mainnet": "NETWORK_FILTER=mainnet ts-node src/index.ts",
-    "start:testnet": "NETWORK_FILTER=testnet ts-node src/index.ts",
-    "build": "node -e \"const y=require('js-yaml'),f=require('fs');f.writeFileSync('src/api/openapi-spec.json',JSON.stringify(y.load(f.readFileSync('src/api/openapi.yaml','utf8')),null,2))\" && tsc && cp src/api/openapi-spec.json dist/api/openapi-spec.json",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
+    "start": "node init && ts-node src/index.ts",
+    "start:mainnet": "node init && NETWORK_FILTER=mainnet ts-node src/index.ts",
+    "start:testnet": "node init && NETWORK_FILTER=testnet ts-node src/index.ts",
+    "build": "node init && node -e \"const y=require('js-yaml'),f=require('fs');f.writeFileSync('src/api/openapi-spec.json',JSON.stringify(y.load(f.readFileSync('src/api/openapi.yaml','utf8')),null,2))\" && tsc && cp src/api/openapi-spec.json dist/api/openapi-spec.json",
+    "dev": "node init && ts-node-dev --respawn --transpile-only src/index.ts"
   },
   "dependencies": {
     "@0glabs/0g-ts-sdk": "^0.3.3",
